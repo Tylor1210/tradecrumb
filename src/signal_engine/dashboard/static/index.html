@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>signal-engine | Research Terminal</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Chart.js for Interactive Charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- Custom Style -->
+    <link rel="stylesheet" href="/static/style.css?v=3">
+</head>
+<body>
+
+    <!-- App Container -->
+    <div class="app-container">
+        
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <i class="fa-solid fa-microscope logo-icon"></i>
+                <span class="logo-text">signal-engine</span>
+            </div>
+            
+            <nav class="nav-links">
+                <button class="nav-btn active" data-tab="scan">
+                    <i class="fa-solid fa-chart-line"></i> Scan Terminal
+                </button>
+                <button class="nav-btn" data-tab="backtest" id="nav-backtest">
+                    <i class="fa-solid fa-scale-balanced"></i> Backtest Analyzer
+                </button>
+                <button class="nav-btn" data-tab="paper">
+                    <i class="fa-solid fa-wallet"></i> Paper Portfolio
+                </button>
+                <button class="nav-btn" data-tab="leaps">
+                    <i class="fa-solid fa-leaf"></i> LEAPS Screener
+                </button>
+            </nav>
+            
+            <!-- Connection Status Panel -->
+            <div class="status-panel">
+                <h4>System Status</h4>
+                <div class="status-indicator">
+                    <span class="status-dot" id="status-mode-dot"></span>
+                    <span id="status-mode-text">Connecting...</span>
+                </div>
+                
+                <div class="api-badges">
+                    <div class="api-badge" id="badge-alpaca">
+                        <span>Alpaca Data</span>
+                        <i class="fa-solid fa-circle"></i>
+                    </div>
+                    <div class="api-badge" id="badge-finnhub">
+                        <span>Finnhub</span>
+                        <i class="fa-solid fa-circle"></i>
+                    </div>
+                    <div class="api-badge" id="badge-newsapi">
+                        <span>NewsAPI</span>
+                        <i class="fa-solid fa-circle"></i>
+                    </div>
+                    <div class="api-badge" id="badge-alpaca-paper">
+                        <span>Alpaca Paper</span>
+                        <i class="fa-solid fa-circle"></i>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            
+            <!-- Banner for Simulated Demo mode -->
+            <div class="banner warning-banner" id="simulated-banner" style="display: none;">
+                <i class="fa-solid fa-triangle-exclamation"></i>
+                <div class="banner-content">
+                    <strong>Running in Simulated Demo Mode</strong>
+                    <p>Configure Alpaca and Finnhub API keys in your <code>.env</code> file to pull live market data.</p>
+                </div>
+            </div>
+
+            <!-- TAB 1: SCAN TERMINAL -->
+            <section class="tab-view active" id="tab-scan">
+                <header class="view-header">
+                    <div>
+                        <h1>Scan Terminal</h1>
+                        <p class="subtitle">Ranked market signals combining technical indicators, news sentiment, and geopolitical analysis.</p>
+                    </div>
+                    
+                    <div class="header-actions">
+                        <div class="date-picker-wrapper">
+                            <label for="scan-date-input">Scan Date</label>
+                            <input type="date" id="scan-date-input">
+                        </div>
+                        <button class="btn btn-primary" id="btn-run-scan">
+                            <i class="fa-solid fa-play"></i> Run Scan
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Scan Results Grid -->
+                <div class="glass-card table-card">
+                    <div class="card-header">
+                        <h3>Ranked Watchlist Signals</h3>
+                        <span class="ticker-count" id="scan-count-label">0 tickers loaded</span>
+                    </div>
+                    
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="scan-table">
+                            <thead>
+                                <tr>
+                                    <th>Rank</th>
+                                    <th>Ticker</th>
+                                    <th>Composite</th>
+                                    <th>Recommendation</th>
+                                    <th>Confidence</th>
+                                    <th>Technical</th>
+                                    <th>Sentiment</th>
+                                    <th>Political</th>
+                                    <th>Primary Catalyst</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scan-table-body">
+                                <tr>
+                                    <td colspan="9" class="text-center py-5">
+                                        <i class="fa-solid fa-spinner fa-spin fa-2x text-muted mb-2"></i>
+                                        <p>Click "Run Scan" to calculate signals...</p>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: BACKTEST ANALYZER -->
+            <section class="tab-view" id="tab-backtest">
+                <header class="view-header">
+                    <div>
+                        <h1>Backtest Analyzer</h1>
+                        <p class="subtitle">Historical portfolio simulation using vectorbt engine over a 5-year period.</p>
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-backtest">
+                        <i class="fa-solid fa-rotate"></i> Run Simulation
+                    </button>
+                </header>
+
+                <!-- Performance Metrics Grid -->
+                <div class="metrics-grid">
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon positive"><i class="fa-solid fa-percent"></i></div>
+                        <div class="metric-data">
+                            <span class="metric-title">Total Return</span>
+                            <h2 id="bt-metric-return">--</h2>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon" id="bt-winrate-icon"><i class="fa-solid fa-trophy"></i></div>
+                        <div class="metric-data">
+                            <span class="metric-title">Win Rate (Target: &ge;70%)</span>
+                            <div class="win-rate-group">
+                                <h2 id="bt-metric-winrate">--</h2>
+                                <span class="badge" id="bt-winrate-badge">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon"><i class="fa-solid fa-chart-line"></i></div>
+                        <div class="metric-data">
+                            <span class="metric-title">Sharpe Ratio</span>
+                            <h2 id="bt-metric-sharpe">--</h2>
+                        </div>
+                    </div>
+
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon negative"><i class="fa-solid fa-arrow-trend-down"></i></div>
+                        <div class="metric-data">
+                            <span class="metric-title">Max Drawdown</span>
+                            <h2 id="bt-metric-drawdown">--</h2>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Chart & Parameters Row -->
+                <div class="backtest-row">
+                    <!-- Equity Curve Chart -->
+                    <div class="glass-card chart-card">
+                        <div class="card-header">
+                            <h3>Portfolio Equity Curve</h3>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="equity-chart"></canvas>
+                        </div>
+                    </div>
+                    
+                    <!-- Trade Details Summary -->
+                    <div class="glass-card details-card">
+                        <div class="card-header">
+                            <h3>Simulation Details</h3>
+                        </div>
+                        <div class="details-body">
+                            <div class="detail-item">
+                                <span>Total Trades executed</span>
+                                <strong id="bt-detail-trades">--</strong>
+                            </div>
+                            <div class="detail-item">
+                                <span>Winning Trades</span>
+                                <strong class="green-text" id="bt-detail-wins">--</strong>
+                            </div>
+                            <div class="detail-item">
+                                <span>Losing Trades</span>
+                                <strong class="red-text" id="bt-detail-losses">--</strong>
+                            </div>
+                            <div class="detail-item">
+                                <span>Directional Accuracy</span>
+                                <strong id="bt-detail-dir-acc">--</strong>
+                            </div>
+                            
+                            <hr class="card-divider">
+                            
+                            <div class="config-summary">
+                                <h4>Backtest Configuration</h4>
+                                <div class="config-line"><span>Target:</span> <strong>5 Years Daily Bars</strong></div>
+                                <div class="config-line"><span>Hold Period:</span> <strong>5 Trading Days</strong></div>
+                                <div class="config-line"><span>Stop Loss:</span> <strong>5.0%</strong></div>
+                                <div class="config-line"><span>Take Profit:</span> <strong>10.0%</strong></div>
+                                <div class="config-line"><span>Allocation:</span> <strong>5.0% per trade</strong></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 3: PAPER PORTFOLIO -->
+            <section class="tab-view" id="tab-paper">
+                <header class="view-header">
+                    <div>
+                        <h1>Paper Trading Portfolio</h1>
+                        <p class="subtitle">Active paper-trading monitor pulling balances and live positions from the Alpaca Sandbox Broker.</p>
+                    </div>
+                </header>
+
+                <!-- Broker Account Status -->
+                <div class="metrics-grid">
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon"><i class="fa-solid fa-piggy-bank"></i></div>
+                        <div class="metric-data">
+                            <span class="metric-title">Portfolio Value</span>
+                            <h2 id="paper-portfolio-value">--</h2>
+                        </div>
+                    </div>
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon"><i class="fa-solid fa-bolt"></i></div>
+                        <div class="metric-data">
+                            <span class="metric-title">Buying Power</span>
+                            <h2 id="paper-buying-power">--</h2>
+                        </div>
+                    </div>
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon"><i class="fa-solid fa-coins"></i></div>
+                        <div class="metric-data">
+                            <span class="metric-title">Cash Balance</span>
+                            <h2 id="paper-cash">--</h2>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Logged Open & Pending Paper Trades -->
+                <div class="glass-card table-card mb-4">
+                    <div class="card-header">
+                        <h3>Active Open &amp; Queued Paper Trades (SQLite Log)</h3>
+                        <span class="badge badge-info"><i class="fa-solid fa-clock"></i> Queued for Market Open</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="paper-open-table">
+                            <thead>
+                                <tr>
+                                    <th>Ticker</th>
+                                    <th>Signal / Strategy</th>
+                                    <th>Entry Date</th>
+                                    <th>Allocation (Notional)</th>
+                                    <th>Score</th>
+                                    <th>Hold Horizon</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="paper-open-body">
+                                <tr>
+                                    <td colspan="7" class="text-center py-4">No open or queued paper trades.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Live Open Positions -->
+                <div class="glass-card table-card mb-4">
+                    <div class="card-header">
+                        <h3>Active Filled Positions (Broker)</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="paper-positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Ticker</th>
+                                    <th>Qty</th>
+                                    <th>Avg Entry</th>
+                                    <th>Current Price</th>
+                                    <th>Market Value</th>
+                                    <th>Unrealized P&L</th>
+                                    <th>Return %</th>
+                                </tr>
+                            </thead>
+                            <tbody id="paper-positions-body">
+                                <tr>
+                                    <td colspan="7" class="text-center py-4">No filled open positions in sandbox (market closed).</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- SQLite Persistent Trade Log -->
+                <div class="glass-card table-card">
+                    <div class="card-header">
+                        <h3>Closed Trades Log (SQLite Database)</h3>
+                        <span class="badge" id="paper-winrate-badge">Win Rate: --</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="paper-closed-table">
+                            <thead>
+                                <tr>
+                                    <th>Ticker</th>
+                                    <th>Entry Date</th>
+                                    <th>Exit Date</th>
+                                    <th>Entry Price</th>
+                                    <th>Exit Price</th>
+                                    <th>Notional</th>
+                                    <th>P&L %</th>
+                                </tr>
+                            </thead>
+                            <tbody id="paper-closed-body">
+                                <tr>
+                                    <td colspan="7" class="text-center py-4">Loading trade logs...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 4: LEAPS SCREENER -->
+            <section class="tab-view" id="tab-leaps">
+                <header class="view-header">
+                    <div>
+                        <h1>LEAPS Screener</h1>
+                        <p class="subtitle">Long call candidates scored on relative strength, earnings growth, and macro themes — with 1-year price targets and estimated returns on $1,000.</p>
+                    </div>
+                </header>
+
+                <div class="glass-card table-card">
+                    <div class="card-header">
+                        <h3>Top LEAPS Long Call Candidates — <span style="color: var(--color-buy);">📈 Bullish / Price UP</span></h3>
+                        <span class="badge badge-info"><i class="fa-solid fa-circle-info"></i> Options chain estimated via Black-Scholes</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="leaps-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Ticker</th>
+                                    <th>Direction</th>
+                                    <th>Score</th>
+                                    <th>Now</th>
+                                    <th>Strike</th>
+                                    <th>1yr Target</th>
+                                    <th>Upside</th>
+                                    <th>Vol</th>
+                                    <th>Prem/share</th>
+                                    <th>Est $1k → (hit target)</th>
+                                    <th>Catalysts</th>
+                                </tr>
+                            </thead>
+                            <tbody id="leaps-table-body">
+                                <tr>
+                                    <td colspan="12" class="text-center py-4">Loading LEAPS candidates...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="padding: 12px 16px; border-top: 1px solid var(--border-glass); font-size: 11px; color: var(--text-muted);">
+                        ⚠️ Return estimates assume the stock hits the 1yr target exactly at expiry. Options can expire worthless — model estimates only, not financial advice.
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- SIGNAL BREAKDOWN DETAIL MODAL -->
+    <div class="modal-overlay" id="detail-modal">
+        <div class="glass-card modal-container">
+            <header class="modal-header">
+                <div>
+                    <h2 id="modal-ticker">AAPL</h2>
+                    <p id="modal-name">Apple Inc.</p>
+                </div>
+                <button class="modal-close" id="btn-close-modal">&times;</button>
+            </header>
+            
+            <div class="modal-body">
+                <!-- Top composite banner -->
+                <div class="modal-summary-banner">
+                    <div class="banner-stat">
+                        <span>Composite Score</span>
+                        <h1 id="modal-composite-score">+0.650</h1>
+                    </div>
+                    <div class="banner-stat">
+                        <span>Recommendation</span>
+                        <h2 id="modal-recommendation">BUY</h2>
+                    </div>
+                    <div class="banner-stat">
+                        <span>Confidence Level</span>
+                        <h3 id="modal-confidence">HIGH</h3>
+                    </div>
+                </div>
+
+                <!-- Component bars and "Why" rules -->
+                <div class="modal-row">
+                    <!-- Component Scores -->
+                    <div class="modal-col">
+                        <h3>Signal Score Breakdown</h3>
+                        <div class="score-breakdown-card">
+                            <div class="score-bar-group">
+                                <div class="score-bar-header">
+                                    <span>Technical Score (40% weight)</span>
+                                    <strong id="modal-score-tech">+0.00</strong>
+                                </div>
+                                <div class="score-bar-track">
+                                    <div class="score-bar-fill" id="modal-fill-tech" style="width: 50%;"></div>
+                                </div>
+                            </div>
+                            <div class="score-bar-group">
+                                <div class="score-bar-header">
+                                    <span>News Sentiment (35% weight)</span>
+                                    <strong id="modal-score-sent">+0.00</strong>
+                                </div>
+                                <div class="score-bar-track">
+                                    <div class="score-bar-fill" id="modal-fill-sent" style="width: 50%;"></div>
+                                </div>
+                            </div>
+                            <div class="score-bar-group">
+                                <div class="score-bar-header">
+                                    <span>Political Catalyst (25% weight)</span>
+                                    <strong id="modal-score-pol">+0.00</strong>
+                                </div>
+                                <div class="score-bar-track">
+                                    <div class="score-bar-fill" id="modal-fill-pol" style="width: 50%;"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Triggered Rules -->
+                    <div class="modal-col">
+                        <h3>Triggered Logic (Plain English)</h3>
+                        <ul class="triggered-rules-list" id="modal-rules-list">
+                            <li><i class="fa-solid fa-circle-check green-text"></i> Price above SMA-20/50/200 — full bullish alignment</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Interactive Chart Panel -->
+                <div class="modal-chart-section" style="margin-bottom: 24px;">
+                    <h3 style="font-family: var(--font-heading); font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text-secondary);">Price, Moving Averages & Support/Resistance (Last 50 Days)</h3>
+                    <div class="modal-chart-wrapper" style="position: relative; height: 260px; background: rgba(0,0,0,0.15); border-radius: 12px; border: 1px solid var(--border-glass); padding: 16px;">
+                        <canvas id="modal-price-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Headlines driving the signal -->
+                <div class="modal-headlines-section">
+                    <h3>Recent Relevant News & Mentions</h3>
+                    <ul class="modal-headlines-list" id="modal-headlines-list">
+                        <li>
+                            <span class="headline-meta">2 hours ago | Finnhub</span>
+                            <p class="headline-text">Apple announces record quarterly revenue and capital return program.</p>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Client application logic -->
+    <script src="/static/app.js?v=3"></script>
+</body>
+</html>

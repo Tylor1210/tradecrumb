@@ -1,0 +1,343 @@
+# signal-engine Signal Configuration
+# All signal weights and parameters are here — tune these without touching code.
+
+# ═══════════════════════════════════════════════════════════════
+# COMPOSITE SIGNAL WEIGHTS
+# Numbers are normalized to sum to 1.0 automatically.
+# Tune these during backtesting via the grid search.
+# ═══════════════════════════════════════════════════════════════
+weights:
+  technical: 0.40
+  sentiment: 0.35
+  political: 0.25
+
+# ═══════════════════════════════════════════════════════════════
+# SIGNAL THRESHOLDS
+# ═══════════════════════════════════════════════════════════════
+thresholds:
+  buy_signal: 0.55    # composite score >= this → BUY
+  sell_signal: -0.40  # composite score <= this → SELL
+  # Between sell and buy → HOLD
+
+# ═══════════════════════════════════════════════════════════════
+# TECHNICAL SIGNAL PARAMETERS
+# ═══════════════════════════════════════════════════════════════
+technical:
+  sma_fast: 20          # fast moving average period
+  sma_mid: 50           # mid moving average period
+  sma_slow: 200         # slow moving average period (minimum data requirement)
+  rsi_period: 14        # RSI look-back period
+  volume_window: 20     # rolling window for avg volume (relative volume calc)
+  breakout_window: 20   # rolling window for support/resistance levels
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+
+  # Internal weights within the technical component (must sum to 1.0)
+  component_weights:
+    ma: 0.30
+    rsi: 0.20
+    macd: 0.25
+    volume: 0.10
+    breakout: 0.15
+
+# ═══════════════════════════════════════════════════════════════
+# SENTIMENT SIGNAL PARAMETERS
+# ═══════════════════════════════════════════════════════════════
+sentiment:
+  lookback_days: 3          # how many days of news to include
+  recency_decay: 0.7        # older news weighted by 0.7^N (N=days old)
+  use_finnhub_precomputed: true  # false = always use VADER locally
+
+# ═══════════════════════════════════════════════════════════════
+# POLITICAL TRIGGER PARAMETERS
+# ═══════════════════════════════════════════════════════════════
+political:
+  political_lookback_days: 2
+
+  # ─── KEYWORD CATEGORIES ───────────────────────────────────
+  # When any of these keywords match in a news headline/summary
+  # AND the news is relevant to the ticker, the category's
+  # sentiment score is applied. Category sentiment is defined
+  # in category_sentiment below.
+  political_keywords:
+
+    # Trump — direct mentions (context-neutral; score from context matching)
+    trump_direct:
+      - "Trump"
+      - "Donald Trump"
+      - "President Trump"
+      - "Trump administration"
+      - "Trump signs"
+      - "Trump announces"
+      - "Truth Social"
+      - "Mar-a-Lago"
+      - "Trump tweet"
+      - "Trump post"
+
+    # Trump equity (DJT / Truth Social)
+    trump_equity:
+      - "DJT"
+      - "Trump Media"
+      - "TMTG"
+      - "Truth Social stock"
+
+    # Tariffs / trade war — bearish for import-sensitive sectors
+    tariff_bearish:
+      - "tariff"
+      - "trade war"
+      - "import tax"
+      - "trade deficit"
+      - "trade restrictions"
+      - "trade barrier"
+      - "Section 301"
+      - "Section 232"
+      - "retaliatory tariff"
+      - "trade retaliation"
+
+    # Sanctions / export controls — bearish
+    sanctions_bearish:
+      - "sanctions"
+      - "export ban"
+      - "export control"
+      - "BIS list"
+      - "entity list"
+      - "OFAC"
+      - "sanctioned"
+
+    # Government/defense contracts — bullish
+    government_contracts_bullish:
+      - "government contract"
+      - "defense contract"
+      - "Pentagon contract"
+      - "NASA contract"
+      - "federal contract"
+      - "awarded contract"
+      - "DOD contract"
+      - "Air Force contract"
+      - "Navy contract"
+      - "Army contract"
+
+    # Deregulation — bullish
+    deregulation_bullish:
+      - "deregulation"
+      - "regulatory rollback"
+      - "regulatory relief"
+      - "EPA rollback"
+      - "SEC easing"
+      - "reduced oversight"
+      - "cut regulations"
+
+    # Tax policy — generally bullish for equities
+    tax_bullish:
+      - "tax cut"
+      - "corporate tax cut"
+      - "tax reform"
+      - "lower taxes"
+      - "tax credit"
+
+    # Geopolitical risk — bearish
+    geopolitical_risk:
+      - "war"
+      - "conflict"
+      - "invasion"
+      - "military strike"
+      - "airstrike"
+      - "missile"
+      - "nuclear"
+      - "NATO Article 5"
+      - "embargo"
+      - "blockade"
+
+    # Elon Musk (DOGE, Tesla, SpaceX, xAI)
+    elon_musk:
+      - "Elon Musk"
+      - "DOGE"
+      - "Musk"
+      - "Department of Government Efficiency"
+      - "xAI"
+      - "Grok"
+
+    # Interest rates / Fed (macro)
+    fed_hawkish:
+      - "rate hike"
+      - "Federal Reserve hike"
+      - "hawkish Fed"
+      - "tighten monetary"
+
+    fed_dovish:
+      - "rate cut"
+      - "Federal Reserve cut"
+      - "dovish Fed"
+      - "ease monetary"
+      - "quantitative easing"
+      - "QE"
+
+    # Antitrust / DOJ / FTC — bearish for named company
+    regulatory_bearish:
+      - "antitrust"
+      - "DOJ investigation"
+      - "FTC probe"
+      - "monopoly"
+      - "class action"
+      - "SEC investigation"
+      - "DOJ lawsuit"
+
+  # ─── CATEGORY SENTIMENT SCORES ────────────────────────────
+  # +1.0 = strongly bullish, -1.0 = strongly bearish, 0.0 = neutral
+  # These are applied when a keyword match is deemed relevant to a ticker.
+  category_sentiment:
+    trump_direct: 0.0          # context-dependent; combined with ticker relevance
+    trump_equity: 0.5          # positive bias when DJT/Truth Social is specifically named
+    tariff_bearish: -0.70
+    sanctions_bearish: -0.75
+    government_contracts_bullish: 0.80
+    deregulation_bullish: 0.60
+    tax_bullish: 0.50
+    geopolitical_risk: -0.55
+    elon_musk: 0.30            # positive for Musk-linked tickers; ambiguous for others
+    fed_hawkish: -0.40         # bearish for growth stocks
+    fed_dovish: 0.45           # bullish for equities
+    regulatory_bearish: -0.65
+
+  # ─── SECTOR RELEVANCE KEYWORDS ────────────────────────────
+  # Used to determine whether general political news is relevant to a ticker
+  # based on that ticker's sector.
+  sector_keywords:
+    technology:
+      - "tech industry"
+      - "semiconductor"
+      - "AI regulation"
+      - "big tech"
+      - "antitrust"
+      - "chip"
+      - "software"
+      - "cloud computing"
+    defense:
+      - "defense spending"
+      - "military"
+      - "Pentagon"
+      - "F-35"
+      - "Lockheed"
+      - "Raytheon"
+      - "Northrop"
+      - "weapons"
+      - "defense budget"
+    energy:
+      - "oil"
+      - "gas"
+      - "pipeline"
+      - "OPEC"
+      - "drilling"
+      - "crude"
+      - "energy"
+      - "LNG"
+      - "refinery"
+    healthcare:
+      - "Medicare"
+      - "Medicaid"
+      - "FDA"
+      - "drug pricing"
+      - "healthcare"
+      - "Affordable Care Act"
+      - "pharma"
+    financials:
+      - "Federal Reserve"
+      - "interest rates"
+      - "Fed"
+      - "banking regulation"
+      - "CFPB"
+      - "Dodd-Frank"
+      - "capital requirements"
+    consumer_staples:
+      - "consumer"
+      - "retail"
+      - "import"
+      - "grocery"
+      - "food prices"
+    consumer_discretionary:
+      - "consumer spending"
+      - "retail sales"
+      - "housing"
+      - "EV"
+      - "electric vehicle"
+      - "auto"
+    etf:
+      - "S&P 500"
+      - "Nasdaq"
+      - "index"
+      - "market"
+      - "equities"
+
+  # ─── THEME RELEVANCE KEYWORDS ─────────────────────────────
+  # Used to determine whether political news is relevant to a ticker
+  # based on that ticker's themes (from watchlist.yaml).
+  theme_keywords:
+    tariff_sensitive:
+      - "tariff"
+      - "import tax"
+      - "trade war"
+      - "China"
+      - "supply chain"
+    elon_musk:
+      - "Elon Musk"
+      - "Musk"
+      - "DOGE"
+      - "Tesla"
+      - "SpaceX"
+    trump_related:
+      - "Trump"
+      - "DJT"
+      - "Truth Social"
+      - "TMTG"
+    AI_infrastructure:
+      - "artificial intelligence"
+      - "AI"
+      - "data center"
+      - "GPU"
+      - "compute"
+      - "large language model"
+      - "LLM"
+    china_exposure:
+      - "China"
+      - "Chinese"
+      - "Huawei"
+      - "Taiwan"
+      - "supply chain"
+      - "decoupling"
+    geopolitical:
+      - "war"
+      - "geopolitical"
+      - "conflict"
+      - "sanctions"
+      - "NATO"
+    electric_vehicles:
+      - "EV"
+      - "electric vehicle"
+      - "battery"
+      - "charging"
+      - "Tesla"
+    GLP1:
+      - "weight loss drug"
+      - "GLP-1"
+      - "Ozempic"
+      - "Wegovy"
+      - "semaglutide"
+      - "tirzepatide"
+
+# ═══════════════════════════════════════════════════════════════
+# LEAPS SCREENER PARAMETERS
+# ═══════════════════════════════════════════════════════════════
+leaps:
+  earnings_growth_quarters: 3         # # of consecutive positive EPS growth quarters
+  relative_strength_window_days: 180  # window for relative strength vs SPY calc
+
+  # Macro themes currently active — LEAPS candidates must match ≥1
+  active_macro_themes:
+    - AI_infrastructure
+    - semiconductors
+    - GLP1
+    - electric_vehicles
+    - defense_spending
+    - energy
+    - china_exposure

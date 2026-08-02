@@ -1,0 +1,189 @@
+# signal-engine Watchlist
+# Edit this file to add/remove/customize tickers.
+# Fields:
+#   symbol:   Ticker symbol (must be valid for Alpaca market data)
+#   name:     Human-readable company name
+#   sector:   Sector for keyword-based relevance matching
+#   themes:   List of macro themes (used for LEAPS screening + political matching)
+#   public:   true = publicly traded (price data fetched)
+#             false = private company, news monitoring only
+#   note:     Optional clarification
+
+tickers:
+
+  # ─────────────────────────────────────────────────
+  # INDEX ETFs / FUNDS
+  # ─────────────────────────────────────────────────
+  - symbol: SPY
+    name: "SPDR S&P 500 ETF Trust"
+    sector: etf
+    themes: [large_cap, index, benchmark]
+    public: true
+
+  - symbol: SPYI
+    name: "NEOS S&P 500 High Income ETF"
+    sector: etf
+    themes: [large_cap, income, options_strategy]
+    public: true
+
+  - symbol: QQQ
+    name: "Invesco QQQ Trust (Nasdaq-100)"
+    sector: etf
+    themes: [technology, large_cap, growth]
+    public: true
+
+  - symbol: USO
+    name: "United States Oil Fund LP"
+    sector: energy
+    themes: [energy, commodities, crude_oil]
+    public: true
+
+  # ─────────────────────────────────────────────────
+  # TOP 20 US COMPANIES BY MARKET CAP
+  # ─────────────────────────────────────────────────
+  - symbol: AAPL
+    name: "Apple Inc."
+    sector: technology
+    themes: [consumer_tech, tariff_sensitive, china_exposure]
+    public: true
+
+  - symbol: MSFT
+    name: "Microsoft Corporation"
+    sector: technology
+    themes: [AI_infrastructure, cloud, enterprise]
+    public: true
+
+  - symbol: NVDA
+    name: "NVIDIA Corporation"
+    sector: technology
+    themes: [AI_infrastructure, semiconductors, data_center, china_exposure]
+    public: true
+
+  - symbol: AMZN
+    name: "Amazon.com Inc."
+    sector: technology
+    themes: [cloud, consumer_tech, logistics, tariff_sensitive]
+    public: true
+
+  - symbol: GOOGL
+    name: "Alphabet Inc. (Class A)"
+    sector: technology
+    themes: [AI_infrastructure, advertising, cloud]
+    public: true
+
+  - symbol: META
+    name: "Meta Platforms Inc."
+    sector: technology
+    themes: [social_media, AI_infrastructure, advertising]
+    public: true
+
+  - symbol: TSLA
+    name: "Tesla Inc."
+    sector: consumer_discretionary
+    themes: [electric_vehicles, AI_infrastructure, energy_storage, elon_musk]
+    public: true
+
+  - symbol: BRK.B
+    name: "Berkshire Hathaway Class B"
+    sector: financials
+    themes: [value, diversified, financials]
+    public: true
+
+  - symbol: LLY
+    name: "Eli Lilly and Company"
+    sector: healthcare
+    themes: [pharmaceuticals, GLP1, biotech]
+    public: true
+
+  - symbol: JPM
+    name: "JPMorgan Chase & Co."
+    sector: financials
+    themes: [banking, interest_rates, financials]
+    public: true
+
+  - symbol: V
+    name: "Visa Inc."
+    sector: financials
+    themes: [payments, financials, consumer]
+    public: true
+
+  - symbol: UNH
+    name: "UnitedHealth Group Incorporated"
+    sector: healthcare
+    themes: [healthcare, insurance, managed_care]
+    public: true
+
+  - symbol: XOM
+    name: "Exxon Mobil Corporation"
+    sector: energy
+    themes: [energy, crude_oil, geopolitical]
+    public: true
+
+  - symbol: AVGO
+    name: "Broadcom Inc."
+    sector: technology
+    themes: [semiconductors, AI_infrastructure, networking, china_exposure]
+    public: true
+
+  - symbol: MA
+    name: "Mastercard Incorporated"
+    sector: financials
+    themes: [payments, financials, consumer]
+    public: true
+
+  - symbol: JNJ
+    name: "Johnson & Johnson"
+    sector: healthcare
+    themes: [pharmaceuticals, medical_devices, healthcare]
+    public: true
+
+  - symbol: WMT
+    name: "Walmart Inc."
+    sector: consumer_staples
+    themes: [retail, tariff_sensitive, consumer]
+    public: true
+
+  - symbol: COST
+    name: "Costco Wholesale Corporation"
+    sector: consumer_staples
+    themes: [retail, consumer, membership]
+    public: true
+
+  - symbol: HD
+    name: "The Home Depot Inc."
+    sector: consumer_discretionary
+    themes: [retail, housing, consumer]
+    public: true
+
+  - symbol: PG
+    name: "Procter & Gamble Co."
+    sector: consumer_staples
+    themes: [consumer_staples, tariff_sensitive, dividends]
+    public: true
+
+  # ─────────────────────────────────────────────────
+  # TRUMP-RELATED / POLITICALLY SENSITIVE
+  # ─────────────────────────────────────────────────
+  - symbol: DJT
+    name: "Trump Media & Technology Group Corp."
+    sector: technology
+    themes: [trump_related, social_media, political]
+    public: true
+    political_tracking: true
+    note: >
+      Direct Trump equity — highly sensitive to political news.
+      Price moves are often driven by Trump statements rather than fundamentals.
+      This is a speculative, politically driven ticker.
+
+  # ─────────────────────────────────────────────────
+  # PRIVATE COMPANIES — NEWS MONITORING ONLY
+  # ─────────────────────────────────────────────────
+  - symbol: SPACEX
+    name: "SpaceX (Starlink / SpaceX)"
+    sector: technology
+    themes: [space, defense, elon_musk, satellite]
+    public: false
+    note: >
+      Private company — not publicly traded as of 2026.
+      Included for news monitoring only (Starlink, SpaceX contracts, etc.)
+      No price data will be fetched. If/when Starlink IPOs, update public: true.

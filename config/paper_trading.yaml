@@ -1,0 +1,49 @@
+# Paper Trading Configuration
+# IMPORTANT: This system ONLY uses paper trading.
+# No live order execution is implemented in signal-engine.
+
+# ─────────────────────────────────────────────────
+# ALPACA PAPER API SETTINGS
+# ─────────────────────────────────────────────────
+alpaca:
+  # This URL is hardcoded in broker.py — do not change to live URL.
+  base_url: "https://paper-api.alpaca.markets"
+  paper_only: true  # safety flag — always true
+
+# ─────────────────────────────────────────────────
+# POSITION SIZING
+# ─────────────────────────────────────────────────
+position_size_pct: 5.0    # % of portfolio value per position
+max_positions: 10          # maximum concurrent open positions
+min_order_value: 100.0     # minimum $ value per order
+
+# ─────────────────────────────────────────────────
+# HOLD PERIODS
+# When signals auto-exit (in trading days)
+# ─────────────────────────────────────────────────
+hold_periods:
+  intraday: 1     # exit same day
+  swing: 5        # exit after 5 trading days
+  monthly: 21     # exit after ~1 calendar month
+
+# Default hold period used when running: uv run signal-engine paper
+default_hold_period: swing
+
+# ─────────────────────────────────────────────────
+# SIGNAL EXECUTION THRESHOLD
+# Only execute paper trades for signals above this composite score.
+# Should be >= backtest's best performing threshold.
+# ─────────────────────────────────────────────────
+execution_threshold: 0.55
+
+# ─────────────────────────────────────────────────
+# RISK MANAGEMENT
+# ─────────────────────────────────────────────────
+stop_loss_pct: 5.0
+take_profit_pct: 10.0
+
+# ─────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────
+trade_log_path: "data/paper_trades.db"   # SQLite database
+report_output_dir: "reports/paper/"      # daily summary reports

@@ -1,0 +1,62 @@
+# Backtest Configuration
+# All parameters here can be adjusted to test different strategies.
+
+# ─────────────────────────────────────────────────
+# DATE RANGE (5 years of daily bars from Alpaca)
+# ─────────────────────────────────────────────────
+start_date: "2020-01-01"
+end_date: "2025-01-01"
+
+# ─────────────────────────────────────────────────
+# HOLD PERIOD
+# How long to hold a position after signal fires.
+# Options: 1 (intraday), 5 (swing/week), 21 (monthly)
+# Set this in single runs; grid_search below sweeps all.
+# ─────────────────────────────────────────────────
+hold_period_days: 5
+
+# ─────────────────────────────────────────────────
+# RISK MANAGEMENT
+# ─────────────────────────────────────────────────
+stop_loss_pct: 5.0       # exit if loss exceeds this %
+take_profit_pct: 10.0    # exit if gain exceeds this %
+
+# ─────────────────────────────────────────────────
+# PORTFOLIO SETTINGS
+# ─────────────────────────────────────────────────
+initial_capital: 100000.0  # paper portfolio starting value ($)
+position_size_pct: 5.0     # % of portfolio allocated per signal trade
+max_positions: 10          # max concurrent positions
+
+# ─────────────────────────────────────────────────
+# WIN RATE TARGET
+# Signals below this bar should NOT proceed to paper trading.
+# Win rate = profitable trades / total trades.
+# Even +0.01% profit counts as a win.
+# ─────────────────────────────────────────────────
+accuracy_target_pct: 70.0
+
+# ─────────────────────────────────────────────────
+# GRID SEARCH CONFIG
+# Run with: uv run signal-engine backtest --grid-search
+# Sweeps all combinations of the ranges below.
+# Results saved to reports/grid_search_results.csv
+# ─────────────────────────────────────────────────
+grid_search:
+  # Signal weight ranges (will be normalized to sum=1)
+  weight_technical_range: [0.20, 0.30, 0.40, 0.50, 0.60]
+  weight_sentiment_range: [0.10, 0.20, 0.30, 0.40]
+  weight_political_range: [0.10, 0.20, 0.30]
+
+  # Hold period options (days)
+  hold_period_range: [1, 5, 10, 21]
+
+  # Buy threshold sweep
+  buy_threshold_range: [0.40, 0.45, 0.50, 0.55, 0.60, 0.65]
+
+# ─────────────────────────────────────────────────
+# OUTPUT
+# ─────────────────────────────────────────────────
+output_dir: "reports"
+save_equity_curve: true        # saves HTML equity curve per run
+grid_search_csv: "reports/grid_search_results.csv"

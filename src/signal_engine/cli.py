@@ -1,0 +1,633 @@
+"""
+signal-engine CLI entry points.
+
+Commands:
+  scan      — Run daily signal scan and print ranked results
+  backtest  — Run backtest against historical data
+  paper     — Run paper trading session
+  leaps     — Run LEAPS candidate screener
+
+Usage:
+  uv run signal-engine scan
+  uv run signal-engine scan --date 2024-06-01
+  uv run signal-engine backtest
+  uv run signal-engine backtest --grid-search
+  uv run signal-engine paper --dry-run
+  uv run signal-engine leaps
+"""
+
+import logging
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import click
+import yaml
+from dotenv import load_dotenv
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
+
+load_dotenv()
+
+console = Console()
+logging.basicConfig(level=logging.WARNING)  # suppress noisy debug logs
+
+CONFIG_DIR = Path("config")
+
+
+def _load_config(filename: str) -> dict:
+    path = CONFIG_DIR / filename
+    if not path.exists():
+        console.print(f"[red]Config not found: {path}[/red]")
+        console.print("[dim]Run from the project root directory.[/dim]")
+        sys.exit(1)
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
+
+
+# ─────────────────────────────────────────────────────────────
+# CLI GROUP
+# ─────────────────────────────────────────────────────────────
+
+@click.group()
+@click.version_option(version="0.1.0", prog_name="signal-engine")
+def main():
+    """
+    signal-engine — Market sentiment & signal research system.
+
+    \b
+    ⚠️  PAPER TRADING ONLY — no live order execution implemented.
+    """
+    pass
+
+
+# ─────────────────────────────────────────────────────────────
+# SCAN
+# ─────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--date", default=None, help="Scan date YYYY-MM-DD (default: today)")
+@click.option("--signals", "signals_config", default="signals.yaml", help="Signal config file")
+@click.option("--watchlist", "watchlist_config", default="watchlist.yaml", help="Watchlist file")
+@click.option("--top", default=None, type=int, help="Show only top N tickers")
+def scan(date, signals_config, watchlist_config, top):
+    """Run daily signal scan and print ranked ticker results."""
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.data.news_client import FinnhubNewsClient, NewsAPIClient
+    from signal_engine.data.cache import ParquetCache
+    from signal_engine.signals.technical import TechnicalAnalyzer
+    from signal_engine.signals.sentiment import SentimentAnalyzer
+    from signal_engine.signals.political import PoliticalTriggerDetector
+    from signal_engine.signals.composite import CompositeScorer
+
+    sig_cfg = _load_config(signals_config)
+    wl_cfg = _load_config(watchlist_config)
+
+    scan_date = datetime.strptime(date, "%Y-%m-%d") if date else datetime.now()
+    all_tickers = wl_cfg.get("tickers", [])
+    public_tickers = [t for t in all_tickers if t.get("public", True)]
+    symbols = [t["symbol"] for t in public_tickers]
+
+    console.print()
+    console.rule(f"[bold cyan]signal-engine scan — {scan_date.strftime('%Y-%m-%d')}[/bold cyan]")
+    console.print(f"[dim]Scanning {len(symbols)} publicly traded tickers[/dim]\n")
+
+    # ── Clients ──────────────────────────────────────────────────────────
+    cache = ParquetCache()
+
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    try:
+        finnhub = FinnhubNewsClient()
+    except EnvironmentError as e:
+        console.print(f"[yellow]Warning: {e}[/yellow]")
+        finnhub = None
+
+    newsapi = None
+    try:
+        newsapi = NewsAPIClient()
+    except EnvironmentError:
+        console.print("[dim]NewsAPI not configured — political sweep limited to Finnhub[/dim]")
+
+    # ── Fetch price data ──────────────────────────────────────────────────
+    price_start = scan_date - timedelta(days=400)  # enough for SMA-200
+
+    cache_key = cache.cache_key_for_bars(symbols, price_start, scan_date, "1Day")
+    price_data = cache.get(cache_key, ttl_hours=24)
+
+    if price_data is None:
+        with console.status("[bold green]Fetching price data from Alpaca..."):
+            raw_prices = alpaca.get_historical_bars(symbols, price_start, scan_date)
+        # Cache is per-ticker; we cache each ticker's data separately
+        price_data = raw_prices
+    else:
+        # Cache returned a combined DataFrame — split back to dict
+        # (for simplicity, re-fetch if structure doesn't match)
+        if isinstance(price_data, dict):
+            raw_prices = price_data
+            price_data = raw_prices
+        else:
+            raw_prices = alpaca.get_historical_bars(symbols, price_start, scan_date)
+            price_data = raw_prices
+
+    console.print(f"[dim]✓ Price data loaded for {len(price_data)} tickers[/dim]")
+
+    # ── Fetch news ────────────────────────────────────────────────────────
+    from_date_str = (scan_date - timedelta(days=3)).strftime("%Y-%m-%d")
+    to_date_str = scan_date.strftime("%Y-%m-%d")
+
+    all_news = []
+    if finnhub:
+        with console.status("[bold green]Fetching news from Finnhub..."):
+            for sym in symbols[:20]:  # rate limit protection
+                try:
+                    news = finnhub.get_company_news(sym, from_date_str, to_date_str)
+                    all_news.extend(news)
+                except Exception:
+                    pass
+            try:
+                general = finnhub.get_market_news("general")
+                all_news.extend(general)
+            except Exception:
+                pass
+
+    # Political sweep via NewsAPI
+    if newsapi:
+        pol_config = sig_cfg.get("political", {})
+        pol_keywords = pol_config.get("political_keywords", {})
+        flat_keywords = [kw for kws in pol_keywords.values() for kw in kws]
+        # Take a representative sample to stay under rate limit
+        sample_keywords = flat_keywords[:8]
+        if sample_keywords:
+            with console.status("[bold green]Fetching political news from NewsAPI..."):
+                try:
+                    pol_news = newsapi.search_political_news(
+                        sample_keywords, from_date_str, to_date_str
+                    )
+                    all_news.extend(pol_news)
+                except Exception as e:
+                    console.print(f"[yellow]NewsAPI sweep: {e}[/yellow]")
+
+    console.print(f"[dim]✓ {len(all_news)} news articles loaded[/dim]")
+
+    # ── Signal computation ────────────────────────────────────────────────
+    tech_config = sig_cfg.get("technical", {})
+    sent_config = sig_cfg.get("sentiment", {})
+    pol_config = sig_cfg.get("political", {})
+    weights = sig_cfg.get("weights", {"technical": 0.40, "sentiment": 0.35, "political": 0.25})
+    thresholds = sig_cfg.get("thresholds", {"buy_signal": 0.55, "sell_signal": -0.40})
+
+    tech_analyzer = TechnicalAnalyzer(tech_config)
+    sent_analyzer = SentimentAnalyzer(sent_config)
+    watchlist_map = {t["symbol"]: t for t in all_tickers}
+    pol_detector = PoliticalTriggerDetector(pol_config, watchlist_map)
+    scorer = CompositeScorer(weights, thresholds)
+
+    reports = []
+    with console.status("[bold green]Computing signals..."):
+        for ticker in symbols:
+            df = price_data.get(ticker)
+            if df is None or df.empty:
+                continue
+            technical = tech_analyzer.compute(ticker, df)
+            sentiment = sent_analyzer.compute(ticker, all_news, scan_date)
+            political = pol_detector.compute(ticker, all_news, scan_date)
+            if technical is None and abs(sentiment.score) < 0.01 and abs(political.score) < 0.01:
+                continue  # skip truly data-less tickers
+            report = scorer.compute(ticker, technical, sentiment, political)
+            reports.append(report)
+
+    if not reports:
+        console.print("[red]No signals computed — check API keys and watchlist.[/red]")
+        sys.exit(1)
+
+    ranked = scorer.rank_signals(reports)
+    if top:
+        ranked = ranked.head(top)
+
+    # ── Display results ───────────────────────────────────────────────────
+    table = Table(
+        title=f"Signal Scan Results — {scan_date.strftime('%Y-%m-%d')}",
+        box=box.ROUNDED,
+        show_lines=True,
+    )
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Ticker", style="bold", width=7)
+    table.add_column("Score", justify="right", width=8)
+    table.add_column("Rec", justify="center", width=6)
+    table.add_column("Conf", justify="center", width=6)
+    table.add_column("Tech", justify="right", width=7)
+    table.add_column("Sent", justify="right", width=7)
+    table.add_column("Pol", justify="right", width=7)
+    table.add_column("Triggered Rules")
+
+    for i, row in ranked.iterrows():
+        rec = row["recommendation"]
+        rec_color = "green" if rec == "BUY" else "red" if rec == "SELL" else "yellow"
+        score = row["composite_score"]
+        score_color = "green" if score > 0.3 else "red" if score < -0.3 else "white"
+        rules = row["triggered_rules"]
+        if len(rules) > 70:
+            rules = rules[:70] + "…"
+
+        table.add_row(
+            str(i + 1),
+            row["ticker"],
+            f"[{score_color}]{score:+.3f}[/{score_color}]",
+            f"[{rec_color}]{rec}[/{rec_color}]",
+            row["confidence"],
+            f"{row['technical_score']:+.3f}",
+            f"{row['sentiment_score']:+.3f}",
+            f"{row['political_score']:+.3f}",
+            rules,
+        )
+
+    console.print(table)
+    buy_count = len(ranked[ranked["recommendation"] == "BUY"])
+    sell_count = len(ranked[ranked["recommendation"] == "SELL"])
+    console.print(
+        f"\n[dim]  {len(ranked)} tickers scanned  |  "
+        f"[green]{buy_count} BUY[/green]  "
+        f"[red]{sell_count} SELL[/red]  "
+        f"{len(ranked) - buy_count - sell_count} HOLD[/dim]\n"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# BACKTEST
+# ─────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--config", "bt_config", default="backtest.yaml", help="Backtest config file")
+@click.option("--signals", "sig_config", default="signals.yaml", help="Signal config file")
+@click.option("--watchlist", "wl_config", default="watchlist.yaml", help="Watchlist file")
+@click.option("--grid-search", is_flag=True, help="Run full weight grid search")
+@click.option("--output-dir", default="reports", help="Output directory for results")
+def backtest(bt_config, sig_config, wl_config, grid_search, output_dir):
+    """Run backtest against historical data. Use --grid-search to sweep weight combos."""
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
+    from signal_engine.backtest.metrics import compute_directional_accuracy
+    from signal_engine.backtest.grid_search import WeightGridSearch, GridSearchConfig
+
+    bt_cfg = _load_config(bt_config)
+    sig_cfg = _load_config(sig_config)
+    wl_cfg = _load_config(wl_config)
+
+    console.print()
+    console.rule("[bold cyan]signal-engine backtest[/bold cyan]")
+
+    symbols = [
+        t["symbol"] for t in wl_cfg.get("tickers", []) if t.get("public", True)
+    ]
+
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    start_dt = datetime.strptime(bt_cfg["start_date"], "%Y-%m-%d")
+    end_dt = datetime.strptime(bt_cfg["end_date"], "%Y-%m-%d")
+
+    console.print(
+        f"Period: {bt_cfg['start_date']} → {bt_cfg['end_date']}  |  "
+        f"{len(symbols)} tickers"
+    )
+
+    with console.status("[bold green]Fetching historical price data..."):
+        price_data = alpaca.get_historical_bars(symbols, start_dt, end_dt)
+
+    console.print(f"[dim]✓ Price data loaded for {len(price_data)} tickers[/dim]\n")
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if grid_search:
+        console.print("[bold]Running weight grid search...[/bold]")
+        console.print("[dim]This generates pre-computed signals from price data only (technical).[/dim]")
+        console.print("[dim]For full signal grid search, run 'scan' for each date first.[/dim]\n")
+
+        gs_cfg = GridSearchConfig.from_yaml(bt_cfg)
+
+        # For grid search, use technical-only signals (price data available, no news API calls)
+        from signal_engine.signals.technical import TechnicalAnalyzer
+        from signal_engine.signals.composite import CompositeScorer
+
+        tech_cfg = sig_cfg.get("technical", {})
+        tech_analyzer = TechnicalAnalyzer(tech_cfg)
+
+        # Pre-compute technical signals for all tickers and dates
+        console.print("[dim]Pre-computing technical signals...[/dim]")
+        all_tech_signals: dict[str, dict] = {}  # ticker → {date: score}
+        for ticker, df in price_data.items():
+            ticker_signals = {}
+            for i in range(200, len(df)):
+                sub_df = df.iloc[:i + 1]
+                sig = tech_analyzer.compute(ticker, sub_df)
+                if sig:
+                    ticker_signals[df.index[i]] = sig.score
+            all_tech_signals[ticker] = ticker_signals
+        console.print(f"[dim]✓ Technical signals computed for {len(all_tech_signals)} tickers[/dim]\n")
+
+        def signal_gen(weights: dict, hold_days: int, threshold: float) -> dict:
+            """Generate buy signal Series for a given weight/threshold combo."""
+            import pandas as pd
+            result = {}
+            w_tech = weights.get("weight_technical", 1.0)
+            for ticker, score_dict in all_tech_signals.items():
+                dates = sorted(score_dict.keys())
+                signals = pd.Series(
+                    [score_dict[d] * w_tech >= threshold for d in dates],
+                    index=dates,
+                )
+                result[ticker] = signals
+            return result
+
+        gs = WeightGridSearch(gs_cfg)
+        csv_path = output_path / "grid_search_results.csv"
+        gs.run(price_data, signal_gen, output_csv=csv_path)
+
+    else:
+        # Single backtest run
+        weights = sig_cfg.get("weights", {"technical": 0.40, "sentiment": 0.35, "political": 0.25})
+        thresholds = sig_cfg.get("thresholds", {"buy_signal": 0.55, "sell_signal": -0.40})
+
+        from signal_engine.signals.technical import TechnicalAnalyzer
+        from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
+
+        console.print(f"Hold period: {bt_cfg.get('hold_period_days', 5)} days")
+        console.print(f"Stop loss: {bt_cfg.get('stop_loss_pct', 5.0)}% | Take profit: {bt_cfg.get('take_profit_pct', 10.0)}%\n")
+
+        tech_analyzer = TechnicalAnalyzer(sig_cfg.get("technical", {}))
+        buy_threshold = thresholds.get("buy_signal", 0.55)
+
+        # Generate technical signals for each ticker
+        import pandas as pd
+        signals: dict = {}
+        for ticker, df in price_data.items():
+            sig_dates = []
+            sig_vals = []
+            for i in range(200, len(df)):
+                sub = df.iloc[:i + 1]
+                ts = tech_analyzer.compute(ticker, sub)
+                sig_dates.append(df.index[i])
+                sig_vals.append(ts.score >= buy_threshold if ts else False)
+            if sig_dates:
+                signals[ticker] = pd.Series(sig_vals, index=sig_dates)
+
+        bt_config_obj = BacktestConfig(
+            start_date=bt_cfg["start_date"],
+            end_date=bt_cfg["end_date"],
+            hold_period_days=bt_cfg.get("hold_period_days", 5),
+            stop_loss_pct=bt_cfg.get("stop_loss_pct", 5.0),
+            take_profit_pct=bt_cfg.get("take_profit_pct", 10.0),
+            initial_capital=bt_cfg.get("initial_capital", 100000.0),
+            position_size_pct=bt_cfg.get("position_size_pct", 5.0),
+        )
+
+        try:
+            engine = BacktestEngine(bt_config_obj)
+            result = engine.run(price_data, signals)
+            metrics = result.get_metrics()
+
+            # Compute directional accuracy per ticker
+            dir_acc_values = []
+            for ticker, df in price_data.items():
+                if ticker in signals:
+                    da = compute_directional_accuracy(df, signals[ticker], bt_config_obj.hold_period_days)
+                    dir_acc_values.append(da)
+            if dir_acc_values:
+                metrics.directional_accuracy_pct = round(sum(dir_acc_values) / len(dir_acc_values), 2)
+
+            console.print(metrics)
+
+            if bt_cfg.get("save_equity_curve", True):
+                eq_path = output_path / f"equity_curve_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                result.save_equity_curve(eq_path)
+
+        except ImportError as e:
+            console.print(f"[red]vectorbt not available: {e}[/red]")
+            console.print("[dim]Install with: uv add vectorbt[/dim]")
+
+
+# ─────────────────────────────────────────────────────────────
+# PAPER TRADING
+# ─────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--config", "pt_config", default="paper_trading.yaml", help="Paper trading config")
+@click.option("--signals", "sig_config", default="signals.yaml", help="Signal config")
+@click.option("--watchlist", "wl_config", default="watchlist.yaml", help="Watchlist")
+@click.option("--dry-run", is_flag=True, help="Compute signals but don't submit orders")
+def paper(pt_config, sig_config, wl_config, dry_run):
+    """Run paper trading session. All trades are simulated via Alpaca paper API."""
+    from signal_engine.paper_trading.tracker import TradeTracker
+    from signal_engine.paper_trading.reporter import PaperTradingReporter
+
+    console.print()
+    console.rule("[bold cyan]signal-engine paper trading[/bold cyan]")
+
+    if dry_run:
+        console.print("[yellow]DRY RUN — signals computed but no orders submitted[/yellow]")
+
+    tracker = TradeTracker()
+    reporter = PaperTradingReporter(tracker)
+
+    account_info = None
+    positions = None
+
+    try:
+        from signal_engine.paper_trading.broker import PaperTradingBroker
+        broker = PaperTradingBroker()
+        account_info = broker.get_account()
+        positions = broker.get_positions()
+        console.print("[dim]✓ Connected to Alpaca paper account[/dim]")
+    except EnvironmentError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        console.print("[dim]Running in log-only mode (no broker connection)[/dim]")
+    except Exception as e:
+        console.print(f"[yellow]Broker connection failed: {e}[/yellow]")
+
+    reporter.print_daily_summary(account_info=account_info, positions=positions)
+
+    if not dry_run and account_info:
+        console.print("[dim]Signal-driven paper order execution: see documentation.[/dim]")
+        console.print("[dim]Run 'signal-engine scan' then pass high-confidence BUY signals to broker.[/dim]")
+
+    console.print("[yellow]⚠️  Paper trading only — no live funds involved[/yellow]\n")
+
+
+# ─────────────────────────────────────────────────────────────
+# LEAPS
+# ─────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--signals", "sig_config", default="signals.yaml", help="Signal config")
+@click.option("--watchlist", "wl_config", default="watchlist.yaml", help="Watchlist")
+@click.option("--top", default=15, type=int, help="Show top N candidates")
+def leaps(sig_config, wl_config, top):
+    """Run LEAPS options candidate screener."""
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.data.news_client import FinnhubNewsClient
+    from signal_engine.leaps.candidate_screener import LEAPSScreener
+    from signal_engine.leaps.options_stub import OptionsChainClient
+
+    sig_cfg = _load_config(sig_config)
+    wl_cfg = _load_config(wl_config)
+    leaps_cfg = sig_cfg.get("leaps", {})
+
+    console.print()
+    console.rule("[bold cyan]signal-engine LEAPS screener[/bold cyan]")
+
+    symbols = [
+        t["symbol"] for t in wl_cfg.get("tickers", []) if t.get("public", True)
+    ]
+    watchlist_map = {t["symbol"]: t for t in wl_cfg.get("tickers", [])}
+
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    finnhub = None
+    try:
+        finnhub = FinnhubNewsClient()
+    except EnvironmentError:
+        console.print("[dim]Finnhub not configured — earnings trend scoring disabled[/dim]")
+
+    # Need 400 days to get SMA-200 + RS window
+    start_dt = datetime.now() - timedelta(days=400)
+    end_dt = datetime.now()
+
+    # Always fetch SPY for relative strength benchmark
+    fetch_symbols = list(set(symbols + ["SPY"]))
+    with console.status("[bold green]Fetching price data..."):
+        price_data = alpaca.get_historical_bars(fetch_symbols, start_dt, end_dt)
+
+    spy_df = price_data.get("SPY")
+    if spy_df is None or spy_df.empty:
+        console.print("[red]Could not fetch SPY data — required for relative strength[/red]")
+        sys.exit(1)
+
+    console.print(f"[dim]✓ Price data for {len(price_data)} tickers[/dim]\n")
+
+    screener = LEAPSScreener(leaps_cfg, finnhub_client=finnhub)
+    options_client = OptionsChainClient()
+
+    candidates = []
+    with console.status("[bold green]Screening LEAPS candidates..."):
+        for ticker in symbols:
+            df = price_data.get(ticker)
+            if df is None or df.empty:
+                continue
+            candidate = screener.screen(ticker, df, spy_df, watchlist_map.get(ticker, {}))
+            candidates.append(candidate)
+
+    candidates.sort(key=lambda c: c.leaps_score, reverse=True)
+
+    table = Table(
+        title=f"LEAPS Long Call Candidates (Top {min(top, len(candidates))}) — Bullish / Price UP",
+        box=box.ROUNDED,
+        show_lines=True,
+    )
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Ticker", style="bold", width=7)
+    table.add_column("Direction", justify="center", width=16)
+    table.add_column("Score", justify="right", width=7)
+    table.add_column("Now", justify="right", width=9)
+    table.add_column("Strike", justify="right", width=9)
+    table.add_column("1yr Target", justify="right", width=11)
+    table.add_column("Upside", justify="right", width=8)
+    table.add_column("Vol", justify="right", width=6)
+    table.add_column("Prem/share", justify="right", width=11)
+    table.add_column("Est $1k → (hit target)", justify="right", width=22)
+    table.add_column("Catalysts")
+
+    for i, c in enumerate(candidates[:top]):
+        score_color = "green" if c.leaps_score >= 0.6 else "yellow" if c.leaps_score >= 0.3 else "red"
+        catalysts_str = " | ".join(c.catalysts[:2]) or "[dim]None[/dim]"
+
+        # 1yr target & upside
+        target_str = f"${c.target_price_1yr:.2f}" if c.target_price_1yr else "N/A"
+        upside_str = f"[green]+{c.target_upside_pct:.1f}%[/green]" if c.target_upside_pct else "N/A"
+
+        # Volatility
+        vol_str = f"{c.hist_volatility * 100:.0f}%" if c.hist_volatility else "N/A"
+
+        # Premium per share (Black-Scholes estimate)
+        prem_str = f"${c.est_call_premium:.2f}" if c.est_call_premium else "N/A"
+
+        # Estimated return on $1,000
+        if c.est_return_on_1k is not None and c.est_return_pct_on_1k is not None:
+            ret_color = "green" if c.est_return_on_1k >= 0 else "red"
+            sign = "+" if c.est_return_on_1k >= 0 else ""
+            ret_str = (
+                f"[{ret_color}]{sign}${c.est_return_on_1k:,.0f} ({sign}{c.est_return_pct_on_1k:.0f}%)[/{ret_color}]"
+            )
+        else:
+            ret_str = "N/A"
+
+        table.add_row(
+            str(i + 1),
+            c.ticker,
+            "[green]📈 CALL (Bullish)[/green]",
+            f"[{score_color}]{c.leaps_score:.3f}[/{score_color}]",
+            f"${c.current_price:.2f}" if c.current_price else "N/A",
+            f"${c.suggested_strike:.2f}" if c.suggested_strike else "N/A",
+            target_str,
+            upside_str,
+            vol_str,
+            prem_str,
+            ret_str,
+            catalysts_str,
+        )
+
+    console.print(table)
+    console.print(
+        "\n[bold]📖 How to read this table:[/bold]\n"
+        "  [green]Direction = CALL (Bullish)[/green] — ALL candidates are long call setups. You profit if the stock goes [green]UP[/green].\n"
+        "  [bold]Now[/bold] = current stock price  |  [bold]Strike[/bold] = suggested call strike (~5% OTM)  |  [bold]1yr Target[/bold] = conservative price projection\n"
+        "  [bold]Upside[/bold] = stock % gain needed to hit target  |  [bold]Vol[/bold] = annualized historical volatility\n"
+        "  [bold]Prem/share[/bold] = Black-Scholes call premium estimate (× 100 = cost of 1 contract)\n"
+        "  [bold]Est $1k → (hit target)[/bold] = P&L if you put $1,000 into calls [italic]and[/italic] the stock exactly hits the 1yr target at expiry\n"
+        "  [yellow]⚠️  These are model estimates — options can expire worthless. Past momentum ≠ future returns.[/yellow]\n"
+    )
+
+    if not options_client.is_connected:
+        console.print(
+            "\n[dim]💡 Options chain data is stubbed — connect Polygon.io for live IV & Greeks (sharper premium estimates).[/dim]"
+        )
+        console.print("[dim]   See: src/signal_engine/leaps/README_LEAPS.md[/dim]\n")
+
+
+
+
+# ─────────────────────────────────────────────────────────────
+# DASHBOARD
+# ─────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Host address to bind to")
+@click.option("--port", default=8000, type=int, help="Port to listen on")
+def dashboard(host, port):
+    """Start the interactive web dashboard server."""
+    from signal_engine.dashboard.server import start_server
+    
+    console.print()
+    console.rule("[bold cyan]signal-engine Web Dashboard[/bold cyan]")
+    console.print(f"[bold green]Starting FastAPI server at http://{host}:{port}[/bold green]")
+    console.print("[dim]Press Ctrl+C to stop the server[/dim]\n")
+    
+    start_server(host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

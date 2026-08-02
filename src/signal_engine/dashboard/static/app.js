@@ -1,0 +1,725 @@
+/**
+ * signal-engine | Dashboard Frontend Logic
+ * Coordinates REST API fetching, DOM population, modal triggers,
+ * and Chart.js rendering.
+ */
+
+document.addEventListener("DOMContentLoaded", () => {
+    // ── Elements & State ─────────────────────────────────────
+    let equityChart = null;
+    let modalPriceChart = null;
+    let scanResultsCache = []; // Store reports for modal details
+
+    const state = {
+        currentTab: "scan",
+        scanDate: new Date().toISOString().split("T")[0]
+    };
+
+    // Set default date input value to today
+    const dateInput = document.getElementById("scan-date-input");
+    if (dateInput) {
+        dateInput.value = state.scanDate;
+        dateInput.addEventListener("change", (e) => {
+            state.scanDate = e.target.value;
+        });
+    }
+
+    // ── Tab Navigation ───────────────────────────────────────
+    const navButtons = document.querySelectorAll(".nav-btn");
+    const tabViews = document.querySelectorAll(".tab-view");
+
+    navButtons.forEach(btn => {
+        btn.addEventListener("click", () => {
+            const targetTab = btn.getAttribute("data-tab");
+            switchTab(targetTab);
+        });
+    });
+
+    function switchTab(tabId) {
+        state.currentTab = tabId;
+
+        // Toggle nav buttons active class
+        navButtons.forEach(btn => {
+            if (btn.getAttribute("data-tab") === tabId) {
+                btn.classList.add("active");
+            } else {
+                btn.classList.remove("active");
+            }
+        });
+
+        // Toggle subviews
+        tabViews.forEach(view => {
+            if (view.id === `tab-${tabId}`) {
+                view.classList.add("active");
+            } else {
+                view.classList.remove("active");
+            }
+        });
+
+        // Load data on activation
+        if (tabId === "backtest") {
+            loadBacktestData();
+        } else if (tabId === "paper") {
+            loadPaperData();
+        } else if (tabId === "leaps") {
+            loadLEAPSData();
+        }
+    }
+
+    // ── System Status Ingestion ──────────────────────────────
+    async function checkSystemStatus() {
+        try {
+            const res = await fetch("/api/status");
+            const data = await res.json();
+
+            const modeDot = document.getElementById("status-mode-dot");
+            const modeText = document.getElementById("status-mode-text");
+            const simBanner = document.getElementById("simulated-banner");
+
+            if (data.mode === "SIMULATED_DEMO") {
+                modeDot.className = "status-dot simulated";
+                modeText.textContent = "SIMULATED DEMO";
+                modeText.style.color = "var(--color-hold)";
+                if (simBanner) simBanner.style.display = "flex";
+            } else {
+                modeDot.className = "status-dot online";
+                modeText.textContent = "LIVE DATA (CONNECTED)";
+                modeText.style.color = "var(--color-online)";
+                if (simBanner) simBanner.style.display = "none";
+            }
+
+            // Set individual API badges
+            toggleBadge("badge-alpaca", data.alpaca_connected);
+            toggleBadge("badge-finnhub", data.finnhub_connected);
+            toggleBadge("badge-newsapi", data.newsapi_connected);
+            toggleBadge("badge-alpaca-paper", data.alpaca_paper_connected);
+
+        } catch (err) {
+            console.error("Status check failed:", err);
+        }
+    }
+
+    function toggleBadge(id, isConnected) {
+        const badge = document.getElementById(id);
+        if (badge) {
+            if (isConnected) {
+                badge.className = "api-badge online";
+            } else {
+                badge.className = "api-badge offline";
+            }
+        }
+    }
+
+    // Initialize status
+    checkSystemStatus();
+
+    // ── Tab 1: Scan Logic ────────────────────────────────────
+    const btnRunScan = document.getElementById("btn-run-scan");
+    const scanTableBody = document.getElementById("scan-table-body");
+    const scanCountLabel = document.getElementById("scan-count-label");
+
+    if (btnRunScan) {
+        btnRunScan.addEventListener("click", runSignalScan);
+    }
+
+    async function runSignalScan() {
+        // Show loading state
+        scanTableBody.innerHTML = `
+            <tr>
+                <td colspan="9" class="text-center py-5">
+                    <i class="fa-solid fa-circle-notch fa-spin fa-2x text-muted mb-2"></i>
+                    <p>Executing analyzers & composite scorers... Please wait.</p>
+                </td>
+            </tr>
+        `;
+
+        try {
+            const res = await fetch(`/api/scan?date=${state.scanDate}`);
+            const data = await res.json();
+
+            scanResultsCache = data.results || [];
+            if (scanCountLabel) {
+                scanCountLabel.textContent = `${scanResultsCache.length} tickers loaded (${data.mode || 'Demo'} mode)`;
+            }
+
+            if (!scanResultsCache.length) {
+                scanTableBody.innerHTML = `<tr><td colspan="9" class="text-center py-4">No signals returned. Verify watchlist configuration.</td></tr>`;
+                return;
+            }
+
+            scanTableBody.innerHTML = "";
+            scanResultsCache.forEach((row, index) => {
+                const tr = document.createElement("tr");
+                tr.setAttribute("data-ticker", row.ticker);
+                
+                // Color codes
+                const scoreClass = row.composite_score > 0.3 ? "positive" : (row.composite_score < -0.3 ? "negative" : "");
+                const recClass = row.recommendation.toLowerCase();
+                
+                // Primary rule trigger extraction
+                const rulesList = (row.triggered_rules || "").split(" | ");
+                const primaryRule = rulesList[0] || "No major triggers";
+
+                tr.innerHTML = `
+                    <td>${index + 1}</td>
+                    <td><strong>${row.ticker}</strong></td>
+                    <td><span class="score-text ${scoreClass}">${row.composite_score > 0 ? '+' : ''}${row.composite_score.toFixed(3)}</span></td>
+                    <td><span class="rec-pill ${recClass}">${row.recommendation}</span></td>
+                    <td><span class="conf-badge ${row.confidence.toLowerCase()}">${row.confidence}</span></td>
+                    <td>${row.technical_score > 0 ? '+' : ''}${row.technical_score.toFixed(2)}</td>
+                    <td>${row.sentiment_score > 0 ? '+' : ''}${row.sentiment_score.toFixed(2)}</td>
+                    <td>${row.political_score > 0 ? '+' : ''}${row.political_score.toFixed(2)}</td>
+                    <td class="text-muted"><small>${primaryRule}</small></td>
+                `;
+
+                // Modal row click
+                tr.addEventListener("click", () => {
+                    openDetailModal(row);
+                });
+
+                scanTableBody.appendChild(tr);
+            });
+
+        } catch (err) {
+            console.error("Scan fetch failed:", err);
+            scanTableBody.innerHTML = `<tr><td colspan="9" class="text-center py-4 red-text"><i class="fa-solid fa-circle-exclamation"></i> Error running scan: ${err.message}</td></tr>`;
+        }
+    }
+
+    // Auto-run scan on load
+    runSignalScan();
+
+    // ── Tab 2: Backtest Logic ─────────────────────────────────
+    const btnRunBacktest = document.getElementById("btn-run-backtest");
+    if (btnRunBacktest) {
+        btnRunBacktest.addEventListener("click", loadBacktestData);
+    }
+
+    async function loadBacktestData() {
+        setBacktestLoadingState();
+
+        try {
+            const res = await fetch("/api/backtest");
+            const data = await res.json();
+
+            // Populate cards
+            const ret = data.metrics.total_return_pct;
+            const win = data.metrics.win_rate_pct;
+            const sharpe = data.metrics.sharpe_ratio;
+            const dd = data.metrics.max_drawdown_pct;
+
+            document.getElementById("bt-metric-return").textContent = `${ret > 0 ? '+' : ''}${ret.toFixed(2)}%`;
+            document.getElementById("bt-metric-return").className = ret >= 0 ? "green-text" : "red-text";
+
+            document.getElementById("bt-metric-winrate").textContent = `${win.toFixed(1)}%`;
+            
+            const winBadge = document.getElementById("bt-winrate-badge");
+            const winIcon = document.getElementById("bt-winrate-icon");
+            if (win >= 70) {
+                winBadge.textContent = "✅ TARGET MET";
+                winBadge.className = "badge badge-info"; // green indicator
+                winBadge.style.backgroundColor = "rgba(16, 185, 129, 0.15)";
+                winBadge.style.color = "var(--color-buy)";
+                winIcon.style.color = "var(--color-buy)";
+                winIcon.style.background = "rgba(16, 185, 129, 0.08)";
+            } else {
+                winBadge.textContent = "❌ LOW WINRATE";
+                winBadge.className = "badge";
+                winBadge.style.backgroundColor = "rgba(239, 68, 68, 0.15)";
+                winBadge.style.color = "var(--color-sell)";
+                winIcon.style.color = "var(--color-sell)";
+                winIcon.style.background = "rgba(239, 68, 68, 0.08)";
+            }
+
+            document.getElementById("bt-metric-sharpe").textContent = sharpe.toFixed(2);
+            document.getElementById("bt-metric-drawdown").textContent = `${dd.toFixed(2)}%`;
+
+            // Details panel
+            document.getElementById("bt-detail-trades").textContent = data.metrics.total_trades;
+            document.getElementById("bt-detail-wins").textContent = data.metrics.winning_trades;
+            document.getElementById("bt-detail-losses").textContent = data.metrics.losing_trades;
+            document.getElementById("bt-detail-dir-acc").textContent = `${data.metrics.directional_accuracy_pct.toFixed(1)}%`;
+
+            // Render Chart
+            renderEquityChart(data.equity_curve);
+
+        } catch (err) {
+            console.error("Backtest loading failed:", err);
+            setBacktestErrorState(err.message);
+        }
+    }
+
+    function setBacktestLoadingState() {
+        document.getElementById("bt-metric-return").textContent = "...";
+        document.getElementById("bt-metric-winrate").textContent = "...";
+        document.getElementById("bt-metric-sharpe").textContent = "...";
+        document.getElementById("bt-metric-drawdown").textContent = "...";
+        document.getElementById("bt-detail-trades").textContent = "...";
+        document.getElementById("bt-detail-wins").textContent = "...";
+        document.getElementById("bt-detail-losses").textContent = "...";
+        document.getElementById("bt-detail-dir-acc").textContent = "...";
+    }
+
+    function setBacktestErrorState(msg) {
+        document.getElementById("bt-metric-return").textContent = "ERR";
+        document.getElementById("bt-metric-winrate").textContent = "ERR";
+    }
+
+    function renderEquityChart(curve) {
+        const ctx = document.getElementById("equity-chart").getContext("2d");
+        
+        if (equityChart) {
+            equityChart.destroy();
+        }
+
+        const labels = curve.map(p => p.date);
+        const values = curve.map(p => p.value);
+
+        // Chart gradient
+        const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+        gradient.addColorStop(0, "rgba(139, 92, 246, 0.35)");
+        gradient.addColorStop(1, "rgba(139, 92, 246, 0.0)");
+
+        equityChart = new Chart(ctx, {
+            type: "line",
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: "Portfolio Value ($)",
+                    data: values,
+                    borderColor: "#8b5cf6",
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    pointHoverRadius: 5,
+                    pointHoverBackgroundColor: "#8b5cf6",
+                    fill: true,
+                    backgroundColor: gradient,
+                    tension: 0.15
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    x: {
+                        grid: { color: "rgba(255, 255, 255, 0.03)" },
+                        ticks: { color: "#9ca3af", font: { family: "Inter", size: 10 } }
+                    },
+                    y: {
+                        grid: { color: "rgba(255, 255, 255, 0.03)" },
+                        ticks: { color: "#9ca3af", font: { family: "Inter", size: 10 } }
+                    }
+                }
+            }
+        });
+    }
+
+    // ── Tab 3: Paper Portfolio Logic ──────────────────────────
+    async function loadPaperData() {
+        try {
+            const res = await fetch("/api/paper");
+            const data = await res.json();
+
+            // Account metrics
+            document.getElementById("paper-portfolio-value").textContent = `$${data.account.portfolio_value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+            document.getElementById("paper-buying-power").textContent = `$${data.account.buying_power.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+            document.getElementById("paper-cash").textContent = `$${data.account.cash.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+            // Logged Open Trades table (SQLite)
+            const openBody = document.getElementById("paper-open-body");
+            if (openBody) {
+                if (!data.logged_open_trades || !data.logged_open_trades.length) {
+                    openBody.innerHTML = `<tr><td colspan="7" class="text-center py-4">No open or queued paper trades.</td></tr>`;
+                } else {
+                    openBody.innerHTML = "";
+                    data.logged_open_trades.forEach(trade => {
+                        const tr = document.createElement("tr");
+                        const notionalStr = trade.notional
+                            ? `$${trade.notional.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+                            : "N/A";
+                        const scoreStr = trade.composite_score ? trade.composite_score.toFixed(3) : "N/A";
+
+                        tr.innerHTML = `
+                            <td><strong>${trade.ticker}</strong></td>
+                            <td><span class="rec-pill buy" style="padding: 2px 8px;">${trade.recommendation || 'BUY'}</span></td>
+                            <td>${(trade.entry_date || "").slice(0, 10)}</td>
+                            <td style="font-weight: 600;">${notionalStr}</td>
+                            <td><span class="score-text positive">${scoreStr}</span></td>
+                            <td><span class="badge badge-info">${trade.hold_period || '1_year'}</span></td>
+                            <td><span class="status-dot online" style="display:inline-block; margin-right:4px;"></span> <span style="color: var(--color-buy);">QUEUED / ACCEPTED</span></td>
+                        `;
+                        openBody.appendChild(tr);
+                    });
+                }
+            }
+
+            // Live Positions table (Alpaca Broker filled positions)
+            const posBody = document.getElementById("paper-positions-body");
+            if (!data.positions || !data.positions.length) {
+                posBody.innerHTML = `<tr><td colspan="7" class="text-center py-4">No filled open positions in sandbox (market closed — orders queued).</td></tr>`;
+            } else {
+                posBody.innerHTML = "";
+                data.positions.forEach(pos => {
+                    const tr = document.createElement("tr");
+                    const pl = pos.unrealized_pl || 0;
+                    const plpc = (pos.unrealized_plpc || 0) * 100;
+                    const plStyle = pl >= 0 ? "green-text" : "red-text";
+
+                    tr.innerHTML = `
+                        <td><strong>${pos.symbol}</strong></td>
+                        <td>${pos.qty}</td>
+                        <td>$${pos.avg_entry_price.toFixed(2)}</td>
+                        <td>$${(pos.current_price || 0).toFixed(2)}</td>
+                        <td>$${(pos.market_value || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                        <td class="${plStyle}">$${pl >= 0 ? '+' : ''}${pl.toFixed(2)}</td>
+                        <td class="${plStyle}">${plpc >= 0 ? '+' : ''}${plpc.toFixed(2)}%</td>
+                    `;
+                    posBody.appendChild(tr);
+                });
+            }
+
+            // Closed Trades table
+            const closedBody = document.getElementById("paper-closed-body");
+            const winrateBadge = document.getElementById("paper-winrate-badge");
+
+            if (data.performance_summary.total_closed_trades > 0) {
+                const wr = data.performance_summary.win_rate_pct;
+                winrateBadge.textContent = `Win Rate: ${wr.toFixed(1)}%`;
+                winrateBadge.style.backgroundColor = wr >= 70 ? "rgba(16, 185, 129, 0.15)" : "rgba(239, 68, 68, 0.15)";
+                winrateBadge.style.color = wr >= 70 ? "var(--color-buy)" : "var(--color-sell)";
+            } else {
+                winrateBadge.textContent = "No closed trades";
+            }
+
+            if (!data.logged_closed_trades || !data.logged_closed_trades.length) {
+                closedBody.innerHTML = `<tr><td colspan="7" class="text-center py-4">No closed trade history logs found in SQLite.</td></tr>`;
+            } else {
+                closedBody.innerHTML = "";
+                data.logged_closed_trades.forEach(trade => {
+                    const tr = document.createElement("tr");
+                    const pl = trade.outcome_pct || 0;
+                    const plStyle = pl > 0 ? "green-text" : "red-text";
+
+                    tr.innerHTML = `
+                        <td><strong>${trade.ticker}</strong></td>
+                        <td>${(trade.entry_date || "").slice(0, 10)}</td>
+                        <td>${(trade.exit_date || "").slice(0, 10)}</td>
+                        <td>$${(trade.entry_price || 0).toFixed(2)}</td>
+                        <td>$${(trade.exit_price || 0).toFixed(2)}</td>
+                        <td>$${(trade.notional || 0).toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                        <td class="${plStyle}">${pl > 0 ? '+' : ''}${pl.toFixed(2)}%</td>
+                    `;
+                    closedBody.appendChild(tr);
+                });
+            }
+
+        } catch (err) {
+            console.error("Paper tab load failed:", err);
+        }
+    }
+
+    // ── Tab 4: LEAPS screener Logic ────────────────────────────
+    async function loadLEAPSData() {
+        const body = document.getElementById("leaps-table-body");
+        body.innerHTML = `
+            <tr>
+                <td colspan="12" class="text-center py-4">
+                    <i class="fa-solid fa-circle-notch fa-spin text-muted mb-2"></i>
+                    <p>Screening candidates &amp; running Black-Scholes estimates...</p>
+                </td>
+            </tr>
+        `;
+
+        try {
+            const res = await fetch("/api/leaps");
+            const data = await res.json();
+
+            if (!data.candidates || !data.candidates.length) {
+                body.innerHTML = `<tr><td colspan="12" class="text-center py-4">No options candidates found.</td></tr>`;
+                return;
+            }
+
+            body.innerHTML = "";
+            data.candidates.forEach((cand, index) => {
+                const tr = document.createElement("tr");
+                const scoreClass = cand.leaps_score >= 0.6 ? "positive" : (cand.leaps_score < 0.3 ? "negative" : "");
+
+                // 1yr target
+                const targetStr = cand.target_price_1yr ? `$${cand.target_price_1yr.toFixed(2)}` : "N/A";
+                const upsideStr = cand.target_upside_pct
+                    ? `<span class="positive">+${cand.target_upside_pct.toFixed(1)}%</span>`
+                    : "N/A";
+
+                // Vol
+                const volStr = cand.hist_volatility ? `${(cand.hist_volatility * 100).toFixed(0)}%` : "N/A";
+
+                // Premium per share
+                const premStr = cand.est_call_premium ? `$${cand.est_call_premium.toFixed(2)}` : "N/A";
+
+                // Est return on $1k
+                let returnStr = "N/A";
+                if (cand.est_return_on_1k !== null && cand.est_return_on_1k !== undefined
+                    && cand.est_return_pct_on_1k !== null && cand.est_return_pct_on_1k !== undefined) {
+                    const retClass = cand.est_return_on_1k >= 0 ? "positive" : "negative";
+                    const sign = cand.est_return_on_1k >= 0 ? "+" : "";
+                    const absRet = Math.abs(cand.est_return_on_1k);
+                    const absPct = Math.abs(cand.est_return_pct_on_1k);
+                    returnStr = `<span class="${retClass}" style="font-weight:600;">${sign}$${absRet.toLocaleString(undefined, {maximumFractionDigits: 0})} (${sign}${absPct.toFixed(0)}%)</span>`;
+                }
+
+                tr.innerHTML = `
+                    <td>${index + 1}</td>
+                    <td><strong>${cand.ticker}</strong></td>
+                    <td><span style="color: var(--color-buy); font-weight: 600; font-size: 12px;">📈 CALL</span></td>
+                    <td><span class="score-text ${scoreClass}">${cand.leaps_score.toFixed(3)}</span></td>
+                    <td>$${(cand.current_price || 0).toFixed(2)}</td>
+                    <td>$${(cand.suggested_strike || 0).toFixed(2)}</td>
+                    <td style="font-weight: 600;">${targetStr}</td>
+                    <td>${upsideStr}</td>
+                    <td style="color: var(--text-muted);">${volStr}</td>
+                    <td style="color: var(--text-muted);">${premStr}</td>
+                    <td>${returnStr}</td>
+                    <td><small>${(cand.catalysts || []).slice(0, 2).join(" | ")}</small></td>
+                `;
+                body.appendChild(tr);
+            });
+
+        } catch (err) {
+            console.error("LEAPS screen failed:", err);
+            body.innerHTML = `<tr><td colspan="12" class="text-center py-4 red-text">Screening failed: ${err.message}</td></tr>`;
+        }
+    }
+
+    // ── Modal Drawer Detail View ──────────────────────────────
+    const detailModal = document.getElementById("detail-modal");
+    const btnCloseModal = document.getElementById("btn-close-modal");
+
+    if (btnCloseModal) {
+        btnCloseModal.addEventListener("click", () => {
+            detailModal.classList.remove("active");
+        });
+    }
+
+    // Close on overlay click
+    if (detailModal) {
+        detailModal.addEventListener("click", (e) => {
+            if (e.target === detailModal) {
+                detailModal.classList.remove("active");
+            }
+        });
+    }
+
+    function openDetailModal(row) {
+        if (!detailModal) return;
+
+        // Set basic values
+        document.getElementById("modal-ticker").textContent = row.ticker;
+        document.getElementById("modal-name").textContent = row.name || row.ticker;
+
+        const compositeText = document.getElementById("modal-composite-score");
+        const compVal = row.composite_score;
+        compositeText.textContent = `${compVal >= 0 ? '+' : ''}${compVal.toFixed(3)}`;
+        
+        // Colors
+        if (compVal >= 0.3) {
+            compositeText.className = "green-text";
+        } else if (compVal <= -0.3) {
+            compositeText.className = "red-text";
+        } else {
+            compositeText.className = "";
+        }
+
+        const recPill = document.getElementById("modal-recommendation");
+        recPill.textContent = row.recommendation;
+        recPill.className = `rec-pill ${row.recommendation.toLowerCase()}`;
+
+        document.getElementById("modal-confidence").textContent = `${row.confidence} CONFIDENCE`;
+
+        // Component scores & Progress bars
+        setScoreBar("modal-score-tech", "modal-fill-tech", row.technical_score);
+        setScoreBar("modal-score-sent", "modal-fill-sent", row.sentiment_score);
+        setScoreBar("modal-score-pol", "modal-fill-pol", row.political_score);
+
+        // Rules List
+        const rulesList = document.getElementById("modal-rules-list");
+        rulesList.innerHTML = "";
+        const rules = (row.triggered_rules || "").split(" | ");
+        rules.forEach(rule => {
+            const li = document.createElement("li");
+            let icon = `<i class="fa-solid fa-circle-info"></i>`;
+            if (rule.startsWith("✅")) {
+                icon = `<i class="fa-solid fa-circle-check green-text"></i>`;
+                rule = rule.replace("✅", "");
+            } else if (rule.startsWith("🔴")) {
+                icon = `<i class="fa-solid fa-circle-exclamation red-text"></i>`;
+                rule = rule.replace("🔴", "");
+            } else if (rule.startsWith("⚠️")) {
+                icon = `<i class="fa-solid fa-triangle-exclamation" style="color: var(--color-hold);"></i>`;
+                rule = rule.replace("⚠️", "");
+            } else if (rule.startsWith("📊")) {
+                icon = `<i class="fa-solid fa-chart-simple text-muted"></i>`;
+                rule = rule.replace("📊", "");
+            }
+            li.innerHTML = `${icon} <span>${rule.trim()}</span>`;
+            rulesList.appendChild(li);
+        });
+
+        // News Headlines list
+        const headlinesList = document.getElementById("modal-headlines-list");
+        headlinesList.innerHTML = "";
+        const headlines = (row.top_headlines || "").split(" | ");
+        headlines.forEach(headline => {
+            if (headline.trim()) {
+                const li = document.createElement("li");
+                // Check if political keyword matched is populated
+                const kw = row.political_keywords ? `<span class="badge" style="background: rgba(139,92,246,0.1); color: var(--accent-primary); margin-left: 8px;">Matched: ${row.political_keywords}</span>` : "";
+                
+                li.innerHTML = `
+                    <div class="headline-meta">Relevant Source ${kw}</div>
+                    <p class="headline-text">${headline.trim()}</p>
+                `;
+                headlinesList.appendChild(li);
+            }
+        });
+
+        if (headlinesList.innerHTML === "") {
+            headlinesList.innerHTML = `<li class="text-center text-muted">No recent news headlines triggered this lookback window.</li>`;
+        }
+
+        // Fetch and render the technical indicator price chart
+        renderModalPriceChart(row.ticker);
+
+        // Open modal
+        detailModal.classList.add("active");
+    }
+
+    async function renderModalPriceChart(ticker) {
+        const ctx = document.getElementById("modal-price-chart").getContext("2d");
+        
+        if (modalPriceChart) {
+            modalPriceChart.destroy();
+            modalPriceChart = null;
+        }
+
+        try {
+            const res = await fetch(`/api/ticker_history/${ticker}`);
+            const history = await res.json();
+            
+            const labels = history.map(h => h.date);
+            const closePrices = history.map(h => h.close);
+            const sma20 = history.map(h => h.sma20);
+            const sma50 = history.map(h => h.sma50);
+            const sma200 = history.map(h => h.sma200);
+            const support = history.map(h => h.support);
+            const resistance = history.map(h => h.resistance);
+            
+            modalPriceChart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: "Close Price",
+                            data: closePrices,
+                            borderColor: "#f3f4f6", // Light grey
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: "SMA-20",
+                            data: sma20,
+                            borderColor: "hsl(42, 94%, 55%)", // Gold
+                            borderWidth: 1.2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: "SMA-50",
+                            data: sma50,
+                            borderColor: "hsl(265, 85%, 65%)", // Purple
+                            borderWidth: 1.2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: "SMA-200",
+                            data: sma200,
+                            borderColor: "hsl(200, 85%, 60%)", // Blue
+                            borderWidth: 1.2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: "Support (20d)",
+                            data: support,
+                            borderColor: "hsl(346, 84%, 57%)", // Red dashed
+                            borderWidth: 1,
+                            borderDash: [4, 4],
+                            pointRadius: 0,
+                            fill: false
+                        },
+                        {
+                            label: "Resistance (20d)",
+                            data: resistance,
+                            borderColor: "hsl(162, 76%, 45%)", // Green dashed
+                            borderWidth: 1,
+                            borderDash: [4, 4],
+                            pointRadius: 0,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: "top",
+                            labels: {
+                                color: "#9ca3af",
+                                font: { family: "Inter", size: 9 },
+                                boxWidth: 10
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: "rgba(255, 255, 255, 0.02)" },
+                            ticks: { color: "#9ca3af", font: { family: "Inter", size: 8 }, maxTicksLimit: 8 }
+                        },
+                        y: {
+                            grid: { color: "rgba(255, 255, 255, 0.02)" },
+                            ticks: { color: "#9ca3af", font: { family: "Inter", size: 8 } }
+                        }
+                    }
+                }
+            });
+            
+        } catch (err) {
+            console.error("Failed to render modal price chart:", err);
+        }
+    }
+
+    function setScoreBar(scoreId, fillId, val) {
+        const textElem = document.getElementById(scoreId);
+        const fillElem = document.getElementById(fillId);
+        
+        textElem.textContent = `${val >= 0 ? '+' : ''}${val.toFixed(2)}`;
+        textElem.className = val > 0 ? "green-text" : (val < 0 ? "red-text" : "");
+        
+        // Map [-1, 1] to [0%, 100%]
+        const pct = ((val + 1) / 2) * 100;
+        fillElem.style.width = `${pct}%`;
+        fillElem.style.backgroundColor = val > 0 ? "var(--color-buy)" : (val < 0 ? "var(--color-sell)" : "var(--text-muted)");
+    }
+});

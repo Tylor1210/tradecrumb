@@ -1,0 +1,62 @@
+[
+  {
+    "ticker": "AAPL",
+    "headline": "Apple reports record quarterly revenue of $119.6 billion",
+    "summary": "Apple Inc. reported its biggest quarter ever, driven by strong iPhone 15 sales and Services growth.",
+    "published_at": "2024-02-01T20:30:00+00:00",
+    "source": "Reuters",
+    "url": "https://reuters.com/example",
+    "raw_sentiment_score": 0.82,
+    "category": "company"
+  },
+  {
+    "ticker": "AAPL",
+    "headline": "Apple faces DOJ antitrust investigation over App Store",
+    "summary": "The Justice Department has launched a formal investigation into Apple's App Store practices.",
+    "published_at": "2024-01-28T14:15:00+00:00",
+    "source": "WSJ",
+    "url": "https://wsj.com/example",
+    "raw_sentiment_score": -0.71,
+    "category": "company"
+  },
+  {
+    "ticker": null,
+    "headline": "Trump announces new tariffs on semiconductor imports from China",
+    "summary": "President Trump announced a 35% tariff on semiconductor components imported from China.",
+    "published_at": "2024-01-30T11:00:00+00:00",
+    "source": "Bloomberg",
+    "url": "https://bloomberg.com/example",
+    "raw_sentiment_score": 0.0,
+    "category": "political"
+  },
+  {
+    "ticker": null,
+    "headline": "Pentagon awards Lockheed Martin $2.8B defense contract for F-35 upgrades",
+    "summary": "The Department of Defense has awarded Lockheed Martin a multi-year contract for next-generation F-35 avionics.",
+    "published_at": "2024-01-29T09:45:00+00:00",
+    "source": "Defense News",
+    "url": "https://defensenews.com/example",
+    "raw_sentiment_score": 0.0,
+    "category": "political"
+  },
+  {
+    "ticker": "NVDA",
+    "headline": "NVIDIA data center revenue surges 400% year-over-year on AI demand",
+    "summary": "NVIDIA's data center segment generated $18.4 billion in revenue, driven by explosive AI chip demand.",
+    "published_at": "2024-02-01T21:00:00+00:00",
+    "source": "CNBC",
+    "url": "https://cnbc.com/example",
+    "raw_sentiment_score": 0.95,
+    "category": "company"
+  },
+  {
+    "ticker": null,
+    "headline": "Elon Musk's DOGE targets $500B in federal spending cuts",
+    "summary": "The Department of Government Efficiency led by Elon Musk has identified $500 billion in potential budget cuts.",
+    "published_at": "2024-01-31T15:30:00+00:00",
+    "source": "Reuters",
+    "url": "https://reuters.com/example2",
+    "raw_sentiment_score": 0.0,
+    "category": "political"
+  }
+]
