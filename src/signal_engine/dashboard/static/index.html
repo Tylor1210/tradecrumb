@@ -117,23 +117,25 @@
                     </div>
                     
                     <div class="table-wrapper">
-                        <table class="premium-table" id="scan-table">
+                        <table class="premium-table scan-table" id="scan-table">
                             <thead>
                                 <tr>
                                     <th>Rank</th>
                                     <th>Ticker</th>
+                                    <th>Signal</th>
                                     <th>Composite</th>
-                                    <th>Recommendation</th>
                                     <th>Confidence</th>
-                                    <th>Technical</th>
-                                    <th>Sentiment</th>
-                                    <th>Political</th>
+                                    <th>Patterns</th>
+                                    <th>Tech</th>
+                                    <th>Sent</th>
+                                    <th>Pol</th>
+                                    <th>Patt</th>
                                     <th>Primary Catalyst</th>
                                 </tr>
                             </thead>
                             <tbody id="scan-table-body">
                                 <tr>
-                                    <td colspan="9" class="text-center py-5">
+                                    <td colspan="11" class="text-center py-5">
                                         <i class="fa-solid fa-spinner fa-spin fa-2x text-muted mb-2"></i>
                                         <p>Click "Run Scan" to calculate signals...</p>
                                     </td>
@@ -567,7 +569,7 @@
                         <div class="score-breakdown-card">
                             <div class="score-bar-group">
                                 <div class="score-bar-header">
-                                    <span>Technical Score (40% weight)</span>
+                                    <span>Technical Score (30% weight)</span>
                                     <strong id="modal-score-tech">+0.00</strong>
                                 </div>
                                 <div class="score-bar-track">
@@ -576,7 +578,7 @@
                             </div>
                             <div class="score-bar-group">
                                 <div class="score-bar-header">
-                                    <span>News Sentiment (35% weight)</span>
+                                    <span>News Sentiment (25% weight)</span>
                                     <strong id="modal-score-sent">+0.00</strong>
                                 </div>
                                 <div class="score-bar-track">
@@ -585,11 +587,20 @@
                             </div>
                             <div class="score-bar-group">
                                 <div class="score-bar-header">
-                                    <span>Political Catalyst (25% weight)</span>
+                                    <span>Political Catalyst (15% weight)</span>
                                     <strong id="modal-score-pol">+0.00</strong>
                                 </div>
                                 <div class="score-bar-track">
                                     <div class="score-bar-fill" id="modal-fill-pol" style="width: 50%;"></div>
+                                </div>
+                            </div>
+                            <div class="score-bar-group">
+                                <div class="score-bar-header">
+                                    <span>Candle/Chart Patterns (30% weight)</span>
+                                    <strong id="modal-score-pattern">+0.00</strong>
+                                </div>
+                                <div class="score-bar-track">
+                                    <div class="score-bar-fill" id="modal-fill-pattern" style="width: 50%;"></div>
                                 </div>
                             </div>
                         </div>
@@ -627,6 +638,6 @@
     </div>
 
     <!-- Client application logic -->
-    <script src="/static/app.js?v=4"></script>
+    <script src="/static/app.js?v=5"></script>
 </body>
 </html>

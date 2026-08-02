@@ -83,6 +83,7 @@ def scan(date, signals_config, watchlist_config, top):
     from signal_engine.signals.technical import TechnicalAnalyzer
     from signal_engine.signals.sentiment import SentimentAnalyzer
     from signal_engine.signals.political import PoliticalTriggerDetector
+    from signal_engine.signals.patterns import PatternDetector
     from signal_engine.signals.composite import CompositeScorer
 
     sig_cfg = _load_config(signals_config)
@@ -183,13 +184,15 @@ def scan(date, signals_config, watchlist_config, top):
     tech_config = sig_cfg.get("technical", {})
     sent_config = sig_cfg.get("sentiment", {})
     pol_config = sig_cfg.get("political", {})
-    weights = sig_cfg.get("weights", {"technical": 0.40, "sentiment": 0.35, "political": 0.25})
+    pattern_config = sig_cfg.get("pattern", {})
+    weights = sig_cfg.get("weights", {"technical": 0.30, "sentiment": 0.25, "political": 0.15, "pattern": 0.30})
     thresholds = sig_cfg.get("thresholds", {"buy_signal": 0.55, "sell_signal": -0.40})
 
     tech_analyzer = TechnicalAnalyzer(tech_config)
     sent_analyzer = SentimentAnalyzer(sent_config)
     watchlist_map = {t["symbol"]: t for t in all_tickers}
     pol_detector = PoliticalTriggerDetector(pol_config, watchlist_map)
+    pattern_detector = PatternDetector(pattern_config)
     scorer = CompositeScorer(weights, thresholds)
 
     reports = []
@@ -201,9 +204,10 @@ def scan(date, signals_config, watchlist_config, top):
             technical = tech_analyzer.compute(ticker, df)
             sentiment = sent_analyzer.compute(ticker, all_news, scan_date)
             political = pol_detector.compute(ticker, all_news, scan_date)
+            pattern = pattern_detector.compute(ticker, df)
             if technical is None and abs(sentiment.score) < 0.01 and abs(political.score) < 0.01:
                 continue  # skip truly data-less tickers
-            report = scorer.compute(ticker, technical, sentiment, political)
+            report = scorer.compute(ticker, technical, sentiment, political, pattern)
             reports.append(report)
 
     if not reports:
@@ -223,16 +227,17 @@ def scan(date, signals_config, watchlist_config, top):
     table.add_column("#", style="dim", width=3)
     table.add_column("Ticker", style="bold", width=7)
     table.add_column("Score", justify="right", width=8)
-    table.add_column("Rec", justify="center", width=6)
+    table.add_column("Rec", justify="center", width=7)
     table.add_column("Conf", justify="center", width=6)
     table.add_column("Tech", justify="right", width=7)
     table.add_column("Sent", justify="right", width=7)
     table.add_column("Pol", justify="right", width=7)
+    table.add_column("Pattern", justify="right", width=7)
     table.add_column("Triggered Rules")
 
     for i, row in ranked.iterrows():
         rec = row["recommendation"]
-        rec_color = "green" if rec == "BUY" else "red" if rec == "SELL" else "yellow"
+        rec_color = "green" if rec == "BUY" else "red" if rec == "SHORT" else "yellow"
         score = row["composite_score"]
         score_color = "green" if score > 0.3 else "red" if score < -0.3 else "white"
         rules = row["triggered_rules"]
@@ -248,17 +253,18 @@ def scan(date, signals_config, watchlist_config, top):
             f"{row['technical_score']:+.3f}",
             f"{row['sentiment_score']:+.3f}",
             f"{row['political_score']:+.3f}",
+            f"{row['pattern_score']:+.3f}",
             rules,
         )
 
     console.print(table)
     buy_count = len(ranked[ranked["recommendation"] == "BUY"])
-    sell_count = len(ranked[ranked["recommendation"] == "SELL"])
+    short_count = len(ranked[ranked["recommendation"] == "SHORT"])
     console.print(
         f"\n[dim]  {len(ranked)} tickers scanned  |  "
         f"[green]{buy_count} BUY[/green]  "
-        f"[red]{sell_count} SELL[/red]  "
-        f"{len(ranked) - buy_count - sell_count} HOLD[/dim]\n"
+        f"[red]{short_count} SHORT[/red]  "
+        f"{len(ranked) - buy_count - short_count} HOLD[/dim]\n"
     )
 
 
@@ -518,7 +524,9 @@ def live(pt_config, sig_config, wl_config, once, poll_minutes, force):
             return
         result = trigger.run_once(force=force)
         for e in result.get("entered", []):
-            console.print(f"[green]{stamp} BUY {e['ticker']} — score {e['score']:.3f} — trade {e['trade_id'][:8]}[/green]")
+            side = e.get("side", "BUY")
+            color = "green" if side == "BUY" else "red"
+            console.print(f"[{color}]{stamp} {side} {e['ticker']} — score {e['score']:.3f} — trade {e['trade_id'][:8]}[/{color}]")
         for x in result.get("exited", []):
             pct = x.get("outcome_pct")
             pct_str = f"{pct:+.2f}%" if pct is not None else "n/a"

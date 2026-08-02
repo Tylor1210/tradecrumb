@@ -124,11 +124,28 @@ document.addEventListener("DOMContentLoaded", () => {
         btnRunScan.addEventListener("click", runSignalScan);
     }
 
+    const REC_META = {
+        BUY: { icon: "fa-arrow-trend-up", label: "BUY", cls: "buy" },
+        SHORT: { icon: "fa-arrow-trend-down", label: "SHORT", cls: "short" },
+        HOLD: { icon: "fa-minus", label: "HOLD", cls: "hold" },
+    };
+
+    function recPillHtml(recommendation) {
+        const meta = REC_META[recommendation] || REC_META.HOLD;
+        return `<span class="rec-pill rec-pill-lg ${meta.cls}"><i class="fa-solid ${meta.icon}"></i> ${meta.label}</span>`;
+    }
+
+    function patternChipsHtml(matchedPatterns) {
+        const names = (matchedPatterns || "").split(",").map(s => s.trim()).filter(Boolean);
+        if (!names.length) return `<span class="text-muted">—</span>`;
+        return names.map(n => `<span class="pattern-chip">${n}</span>`).join(" ");
+    }
+
     async function runSignalScan() {
         // Show loading state
         scanTableBody.innerHTML = `
             <tr>
-                <td colspan="9" class="text-center py-5">
+                <td colspan="11" class="text-center py-5">
                     <i class="fa-solid fa-circle-notch fa-spin fa-2x text-muted mb-2"></i>
                     <p>Executing analyzers & composite scorers... Please wait.</p>
                 </td>
@@ -145,7 +162,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
             if (!scanResultsCache.length) {
-                scanTableBody.innerHTML = `<tr><td colspan="9" class="text-center py-4">No signals returned. Verify watchlist configuration.</td></tr>`;
+                scanTableBody.innerHTML = `<tr><td colspan="11" class="text-center py-4">No signals returned. Verify watchlist configuration.</td></tr>`;
                 return;
             }
 
@@ -153,11 +170,13 @@ document.addEventListener("DOMContentLoaded", () => {
             scanResultsCache.forEach((row, index) => {
                 const tr = document.createElement("tr");
                 tr.setAttribute("data-ticker", row.ticker);
-                
+                tr.classList.add(`row-${(REC_META[row.recommendation] || REC_META.HOLD).cls}`);
+
                 // Color codes
                 const scoreClass = row.composite_score > 0.3 ? "positive" : (row.composite_score < -0.3 ? "negative" : "");
-                const recClass = row.recommendation.toLowerCase();
-                
+                const patternScore = row.pattern_score || 0;
+                const pattScoreClass = patternScore > 0 ? "positive" : (patternScore < 0 ? "negative" : "");
+
                 // Primary rule trigger extraction
                 const rulesList = (row.triggered_rules || "").split(" | ");
                 const primaryRule = rulesList[0] || "No major triggers";
@@ -165,12 +184,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 tr.innerHTML = `
                     <td>${index + 1}</td>
                     <td><strong>${row.ticker}</strong></td>
+                    <td>${recPillHtml(row.recommendation)}</td>
                     <td><span class="score-text ${scoreClass}">${row.composite_score > 0 ? '+' : ''}${row.composite_score.toFixed(3)}</span></td>
-                    <td><span class="rec-pill ${recClass}">${row.recommendation}</span></td>
                     <td><span class="conf-badge ${row.confidence.toLowerCase()}">${row.confidence}</span></td>
+                    <td>${patternChipsHtml(row.matched_patterns)}</td>
                     <td>${row.technical_score > 0 ? '+' : ''}${row.technical_score.toFixed(2)}</td>
                     <td>${row.sentiment_score > 0 ? '+' : ''}${row.sentiment_score.toFixed(2)}</td>
                     <td>${row.political_score > 0 ? '+' : ''}${row.political_score.toFixed(2)}</td>
+                    <td><span class="score-text ${pattScoreClass}">${patternScore > 0 ? '+' : ''}${patternScore.toFixed(2)}</span></td>
                     <td class="text-muted"><small>${primaryRule}</small></td>
                 `;
 
@@ -184,7 +205,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         } catch (err) {
             console.error("Scan fetch failed:", err);
-            scanTableBody.innerHTML = `<tr><td colspan="9" class="text-center py-4 red-text"><i class="fa-solid fa-circle-exclamation"></i> Error running scan: ${err.message}</td></tr>`;
+            scanTableBody.innerHTML = `<tr><td colspan="11" class="text-center py-4 red-text"><i class="fa-solid fa-circle-exclamation"></i> Error running scan: ${err.message}</td></tr>`;
         }
     }
 
@@ -535,8 +556,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         const recPill = document.getElementById("modal-recommendation");
-        recPill.textContent = row.recommendation;
-        recPill.className = `rec-pill ${row.recommendation.toLowerCase()}`;
+        const recMeta = REC_META[row.recommendation] || REC_META.HOLD;
+        recPill.innerHTML = `<i class="fa-solid ${recMeta.icon}"></i> ${recMeta.label}`;
+        recPill.className = `rec-pill rec-pill-lg ${recMeta.cls}`;
 
         document.getElementById("modal-confidence").textContent = `${row.confidence} CONFIDENCE`;
 
@@ -544,6 +566,7 @@ document.addEventListener("DOMContentLoaded", () => {
         setScoreBar("modal-score-tech", "modal-fill-tech", row.technical_score);
         setScoreBar("modal-score-sent", "modal-fill-sent", row.sentiment_score);
         setScoreBar("modal-score-pol", "modal-fill-pol", row.political_score);
+        setScoreBar("modal-score-pattern", "modal-fill-pattern", row.pattern_score || 0);
 
         // Rules List
         const rulesList = document.getElementById("modal-rules-list");

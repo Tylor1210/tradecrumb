@@ -31,6 +31,7 @@ from signal_engine.data.cache import ParquetCache
 from signal_engine.signals.technical import TechnicalAnalyzer
 from signal_engine.signals.sentiment import SentimentAnalyzer
 from signal_engine.signals.political import PoliticalTriggerDetector
+from signal_engine.signals.patterns import PatternDetector
 from signal_engine.signals.composite import CompositeScorer
 
 from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
@@ -233,6 +234,10 @@ def api_scan(date: Optional[str] = Query(None, description="Scan date YYYY-MM-DD
         import random
         random.seed(scan_date.toordinal())
         simulated_results = []
+        demo_patterns = {
+            "bullish": ["Bullish Engulfing", "Morning Star", "Hammer", "Double Bottom"],
+            "bearish": ["Bearish Engulfing", "Evening Star", "Shooting Star", "Double Top"],
+        }
         for i, t in enumerate(public_tickers):
             sym = t["symbol"]
             # Stable score per ticker per day
@@ -241,22 +246,26 @@ def api_scan(date: Optional[str] = Query(None, description="Scan date YYYY-MM-DD
             tech = round(((h % 70) - 35) / 50.0, 3)
             sent = round(((h % 90) - 45) / 50.0, 3)
             pol = round(((h % 110) - 55) / 60.0, 3)
+            pattern_score = round(((h % 130) - 65) / 100.0, 3)
 
-            rec = "BUY" if comp_score >= 0.55 else "SELL" if comp_score <= -0.40 else "HOLD"
+            rec = "BUY" if comp_score >= 0.55 else "SHORT" if comp_score <= -0.40 else "HOLD"
             conf = "HIGH" if (tech > 0 and sent > 0 and pol > 0) or (tech < 0 and sent < 0 and pol < 0) else "MEDIUM"
 
+            matched_pattern_names = []
             rules = []
             if rec == "BUY":
+                matched_pattern_names = [demo_patterns["bullish"][h % len(demo_patterns["bullish"])]]
                 rules = [
                     f"✅ Price above SMA-20/50/200 — bullish trend alignment",
                     f"✅ Positive sentiment on Finnhub news",
-                    f"✅ Bullish government contract wins"
+                    f"✅ Pattern: {matched_pattern_names[0]} (bullish)",
                 ]
-            elif rec == "SELL":
+            elif rec == "SHORT":
+                matched_pattern_names = [demo_patterns["bearish"][h % len(demo_patterns["bearish"])]]
                 rules = [
                     f"🔴 Price below SMA-20/50/200 — death cross trend",
                     f"🔴 Bearish political trigger: new supply chain tariffs",
-                    f"🔴 RSI overbought at 76.5 — mean reversion indicator"
+                    f"🔴 Pattern: {matched_pattern_names[0]} (bearish)",
                 ]
             else:
                 rules = ["⚪ No significant triggers — HOLD signal"]
@@ -272,9 +281,11 @@ def api_scan(date: Optional[str] = Query(None, description="Scan date YYYY-MM-DD
                 "technical_score": tech,
                 "sentiment_score": sent,
                 "political_score": pol,
+                "pattern_score": pattern_score,
                 "triggered_rules": " | ".join(rules),
                 "top_headlines": f"General news for {sym} shows stable outlook. | Retail segment performs strongly.",
                 "political_keywords": "tariff, contract" if pol != 0 else "",
+                "matched_patterns": ", ".join(matched_pattern_names),
             })
         # Sort by composite score descending
         simulated_results.sort(key=lambda x: x["composite_score"], reverse=True)
@@ -294,13 +305,15 @@ def api_scan(date: Optional[str] = Query(None, description="Scan date YYYY-MM-DD
         tech_config = sig_cfg.get("technical", {})
         sent_config = sig_cfg.get("sentiment", {})
         pol_config = sig_cfg.get("political", {})
-        weights = sig_cfg.get("weights", {"technical": 0.40, "sentiment": 0.35, "political": 0.25})
+        pattern_config = sig_cfg.get("pattern", {})
+        weights = sig_cfg.get("weights", {"technical": 0.30, "sentiment": 0.25, "political": 0.15, "pattern": 0.30})
         thresholds = sig_cfg.get("thresholds", {"buy_signal": 0.55, "sell_signal": -0.40})
 
         tech_analyzer = TechnicalAnalyzer(tech_config)
         sent_analyzer = SentimentAnalyzer(sent_config)
         watchlist_map = {t["symbol"]: t for t in watchlist}
         pol_detector = PoliticalTriggerDetector(pol_config, watchlist_map)
+        pattern_detector = PatternDetector(pattern_config)
         scorer = CompositeScorer(weights, thresholds)
 
         # Load prices
@@ -332,7 +345,8 @@ def api_scan(date: Optional[str] = Query(None, description="Scan date YYYY-MM-DD
             technical = tech_analyzer.compute(ticker, df)
             sentiment = sent_analyzer.compute(ticker, all_news, scan_date)
             political = pol_detector.compute(ticker, all_news, scan_date)
-            report = scorer.compute(ticker, technical, sentiment, political)
+            pattern = pattern_detector.compute(ticker, df)
+            report = scorer.compute(ticker, technical, sentiment, political, pattern)
             reports.append(report)
 
         ranked = scorer.rank_signals(reports)

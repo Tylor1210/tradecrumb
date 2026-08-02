@@ -7,17 +7,26 @@
 # Tune these during backtesting via the grid search.
 # ═══════════════════════════════════════════════════════════════
 weights:
-  technical: 0.40
-  sentiment: 0.35
-  political: 0.25
+  technical: 0.30
+  sentiment: 0.25
+  political: 0.15
+  pattern: 0.30
 
 # ═══════════════════════════════════════════════════════════════
 # SIGNAL THRESHOLDS
 # ═══════════════════════════════════════════════════════════════
 thresholds:
-  buy_signal: 0.55    # composite score >= this → BUY
-  sell_signal: -0.40  # composite score <= this → SELL
+  buy_signal: 0.55    # composite score >= this → BUY (open long)
+  sell_signal: -0.40  # composite score <= this → SHORT (open short)
   # Between sell and buy → HOLD
+
+# ═══════════════════════════════════════════════════════════════
+# CANDLESTICK / CHART PATTERN PARAMETERS
+# ═══════════════════════════════════════════════════════════════
+pattern:
+  chart_pattern_lookback: 40   # bars scanned for double top/bottom
+  peak_tolerance_pct: 1.5      # how close two peaks/troughs must be (%) to count as "equal"
+  candle_recency_window: 3     # only check the last N bars for candlestick patterns
 
 # ═══════════════════════════════════════════════════════════════
 # TECHNICAL SIGNAL PARAMETERS

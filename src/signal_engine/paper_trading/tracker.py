@@ -18,7 +18,7 @@ Schema:
     notional            REAL
     outcome_pct         REAL (nullable — set on close)
     status              TEXT ('OPEN' | 'CLOSED')
-    recommendation      TEXT ('BUY' | 'SELL')
+    recommendation      TEXT ('BUY' | 'SHORT')
     composite_score     REAL
     hold_period         TEXT ('intraday' | 'swing' | 'monthly')
     signal_breakdown_json TEXT (full SignalReport breakdown as JSON)
@@ -146,18 +146,20 @@ class TradeTracker:
 
         Returns outcome_pct (positive = profit, negative = loss, None if not found).
         Win definition: outcome_pct > 0 (even +0.01% = win).
+        For SHORT trades, profit is inverted — price falling is a win.
         """
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute(
-                "SELECT entry_price FROM trades WHERE trade_id = ?", (trade_id,)
+                "SELECT entry_price, recommendation FROM trades WHERE trade_id = ?", (trade_id,)
             ).fetchone()
 
             if row is None:
                 logger.warning("Trade ID not found for exit: %s", trade_id)
                 return None
 
-            entry_price = float(row[0])
-            outcome_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
+            entry_price, recommendation = float(row[0]), row[1]
+            raw_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
+            outcome_pct = -raw_pct if recommendation == "SHORT" else raw_pct
 
             conn.execute(
                 """

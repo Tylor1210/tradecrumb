@@ -81,10 +81,10 @@ class TestCompositeScorer:
         assert result.composite_score >= DEFAULT_THRESHOLDS["buy_signal"]
 
     def test_sell_signal_fires_below_threshold(self):
-        """All strongly negative signals → SELL."""
+        """All strongly negative signals → SHORT."""
         scorer = CompositeScorer(DEFAULT_WEIGHTS, DEFAULT_THRESHOLDS)
         result = scorer.compute("TEST", make_tech(-0.9), make_sent(-0.9), make_pol(-0.9))
-        assert result.recommendation == "SELL"
+        assert result.recommendation == "SHORT"
         assert result.composite_score <= DEFAULT_THRESHOLDS["sell_signal"]
 
     def test_hold_for_mixed_signals(self):

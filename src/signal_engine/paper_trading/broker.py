@@ -117,7 +117,7 @@ class PaperTradingBroker:
         symbol: str,
         qty: float,
     ) -> dict:
-        """Submit a paper market sell order for a specified quantity."""
+        """Submit a paper market sell order for a specified quantity (closing a long)."""
         request = self._MarketOrderRequest(
             symbol=symbol,
             qty=qty,
@@ -125,6 +125,29 @@ class PaperTradingBroker:
             time_in_force=self._TimeInForce.DAY,
         )
         logger.info("Submitting paper SELL: %s qty=%s", symbol, qty)
+        order = self._client.submit_order(request)
+        return self._order_to_dict(order)
+
+    def submit_market_short(
+        self,
+        symbol: str,
+        qty: float,
+    ) -> dict:
+        """
+        Open a paper short position (a sell order with no existing long position).
+
+        Requires the paper account to have margin/shorting enabled for the
+        symbol — true by default for marginable symbols on a standard Alpaca
+        paper account. Requires whole-share qty; Alpaca does not support
+        notional (fractional) orders on the sell side.
+        """
+        request = self._MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=self._OrderSide.SELL,
+            time_in_force=self._TimeInForce.DAY,
+        )
+        logger.info("Submitting paper SHORT: %s qty=%s", symbol, qty)
         order = self._client.submit_order(request)
         return self._order_to_dict(order)
 

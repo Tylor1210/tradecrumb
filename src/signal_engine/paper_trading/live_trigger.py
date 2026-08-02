@@ -74,6 +74,7 @@ class LiveDayTradeTrigger:
         from signal_engine.data.news_client import FinnhubNewsClient, NewsAPIClient
         from signal_engine.signals.composite import CompositeScorer
         from signal_engine.signals.political import PoliticalTriggerDetector
+        from signal_engine.signals.patterns import PatternDetector
         from signal_engine.signals.sentiment import SentimentAnalyzer
         from signal_engine.signals.technical import TechnicalAnalyzer
 
@@ -81,7 +82,7 @@ class LiveDayTradeTrigger:
         public_tickers = [t for t in watchlist if t.get("public", True)]
         symbols = [t["symbol"] for t in public_tickers]
         if not symbols:
-            return []
+            return [], {}
 
         alpaca = AlpacaDataClient()
         cache = ParquetCache()
@@ -122,11 +123,15 @@ class LiveDayTradeTrigger:
         sent_analyzer = SentimentAnalyzer(self.sig_config.get("sentiment", {}))
         watchlist_map = {t["symbol"]: t for t in watchlist}
         pol_detector = PoliticalTriggerDetector(self.sig_config.get("political", {}), watchlist_map)
-        weights = self.sig_config.get("weights", {"technical": 0.40, "sentiment": 0.35, "political": 0.25})
+        pattern_detector = PatternDetector(self.sig_config.get("pattern", {}))
+        weights = self.sig_config.get(
+            "weights", {"technical": 0.30, "sentiment": 0.25, "political": 0.15, "pattern": 0.30}
+        )
         thresholds = self.sig_config.get("thresholds", {"buy_signal": 0.55, "sell_signal": -0.40})
         scorer = CompositeScorer(weights, thresholds)
 
         reports = []
+        last_prices = {}
         for ticker in symbols:
             df = price_data.get(ticker)
             if df is None or df.empty:
@@ -134,8 +139,10 @@ class LiveDayTradeTrigger:
             technical = tech_analyzer.compute(ticker, df)
             sentiment = sent_analyzer.compute(ticker, all_news, scan_date)
             political = pol_detector.compute(ticker, all_news, scan_date)
-            reports.append(scorer.compute(ticker, technical, sentiment, political))
-        return reports
+            pattern = pattern_detector.compute(ticker, df)
+            reports.append(scorer.compute(ticker, technical, sentiment, political, pattern))
+            last_prices[ticker] = float(df["close"].iloc[-1])
+        return reports, last_prices
 
     # ── Exit ──────────────────────────────────────────────────────────────
 
@@ -167,35 +174,70 @@ class LiveDayTradeTrigger:
         if slots <= 0:
             return []
 
-        reports = self._compute_signals(now)
-        candidates = [
+        reports, last_prices = self._compute_signals(now)
+        long_candidates = [
             r for r in reports if r.composite_score >= self.execution_threshold and r.ticker not in open_tickers
         ]
-        candidates.sort(key=lambda r: r.composite_score, reverse=True)
-        candidates = candidates[:slots]
+        short_candidates = [
+            r for r in reports if r.composite_score <= -self.execution_threshold and r.ticker not in open_tickers
+        ]
+        long_candidates.sort(key=lambda r: r.composite_score, reverse=True)
+        short_candidates.sort(key=lambda r: r.composite_score)
+
+        # Interleave BUY/SHORT candidates so one direction can't starve the other of slots.
+        candidates: list = []
+        li = si = 0
+        while len(candidates) < slots and (li < len(long_candidates) or si < len(short_candidates)):
+            if li < len(long_candidates):
+                candidates.append(("BUY", long_candidates[li]))
+                li += 1
+            if len(candidates) >= slots:
+                break
+            if si < len(short_candidates):
+                candidates.append(("SHORT", short_candidates[si]))
+                si += 1
 
         entered = []
-        for r in candidates:
+        for side, r in candidates:
             try:
-                order = self.broker.submit_market_buy(r.ticker, notional=self.trade_size)
-                entry_price = order.get("filled_avg_price")
-                qty = order.get("qty") or (self.trade_size / entry_price if entry_price else 0)
+                if side == "BUY":
+                    order = self.broker.submit_market_buy(r.ticker, notional=self.trade_size)
+                    entry_price = order.get("filled_avg_price")
+                    qty = order.get("qty") or (self.trade_size / entry_price if entry_price else 0)
+                else:
+                    price = last_prices.get(r.ticker)
+                    if not price or price <= 0:
+                        logger.warning("No reference price for %s, skipping short entry", r.ticker)
+                        continue
+                    qty = int(self.trade_size // price)  # shorts require whole-share qty, no notional orders
+                    if qty < 1:
+                        logger.info(
+                            "Trade size $%.0f too small for 1 share of %s at $%.2f — skipping short",
+                            self.trade_size, r.ticker, price,
+                        )
+                        continue
+                    order = self.broker.submit_market_short(r.ticker, qty=qty)
+                    entry_price = order.get("filled_avg_price") or price
+                    qty = order.get("qty") or qty
+
+                entry_price = float(entry_price) if entry_price else 0.0
+                qty = float(qty or 0)
                 trade_id = self.tracker.log_entry(
                     ticker=r.ticker,
                     signal_date=now,
                     entry_date=now,
-                    entry_price=float(entry_price) if entry_price else 0.0,
-                    qty=float(qty or 0),
-                    notional=self.trade_size,
-                    recommendation="BUY",
+                    entry_price=entry_price,
+                    qty=qty,
+                    notional=round(qty * entry_price, 2) if entry_price else self.trade_size,
+                    recommendation=side,
                     composite_score=r.composite_score,
                     signal_breakdown=_report_to_dict(r),
                     hold_period="intraday",
                     trade_id=order.get("id"),
                 )
-                entered.append({"ticker": r.ticker, "trade_id": trade_id, "score": r.composite_score})
+                entered.append({"ticker": r.ticker, "trade_id": trade_id, "score": r.composite_score, "side": side})
             except Exception as e:
-                logger.warning("Entry failed for %s: %s", r.ticker, e)
+                logger.warning("Entry failed for %s (%s): %s", r.ticker, side, e)
         return entered
 
     # ── One tick ──────────────────────────────────────────────────────────

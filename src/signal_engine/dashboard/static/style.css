@@ -422,7 +422,8 @@ body {
     border: 1px solid rgba(16, 185, 129, 0.3);
 }
 
-.rec-pill.sell {
+.rec-pill.sell,
+.rec-pill.short {
     background-color: rgba(239, 68, 68, 0.15);
     color: var(--color-sell);
     border: 1px solid rgba(239, 68, 68, 0.3);
@@ -432,6 +433,42 @@ body {
     background-color: rgba(245, 158, 11, 0.15);
     color: var(--color-hold);
     border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.rec-pill-lg {
+    font-size: 12px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+}
+
+.rec-pill-lg.buy {
+    box-shadow: 0 0 14px rgba(16, 185, 129, 0.15);
+}
+
+.rec-pill-lg.short {
+    box-shadow: 0 0 14px rgba(239, 68, 68, 0.15);
+}
+
+/* Subtle left-edge accent so BUY/SHORT/HOLD rows are scannable at a glance */
+.scan-table tbody tr.row-buy { box-shadow: inset 3px 0 0 var(--color-buy); }
+.scan-table tbody tr.row-short { box-shadow: inset 3px 0 0 var(--color-sell); }
+.scan-table tbody tr.row-hold { box-shadow: inset 3px 0 0 var(--color-hold); }
+
+.pattern-chip {
+    display: inline-block;
+    background: rgba(139, 92, 246, 0.12);
+    color: var(--accent-primary);
+    border: 1px solid rgba(139, 92, 246, 0.25);
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    margin: 1px 0;
 }
 
 .conf-badge {
