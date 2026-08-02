@@ -17,6 +17,11 @@ position_size_pct: 5.0    # % of portfolio value per position
 max_positions: 10          # maximum concurrent open positions
 min_order_value: 100.0     # minimum $ value per order
 
+# Fixed dollar amount per trade for `signal-engine live` (intraday day trading).
+# When set, this overrides position_size_pct for the live trigger only —
+# every entry is a $-notional order of this size regardless of portfolio value.
+fixed_trade_size: 1000.0
+
 # ─────────────────────────────────────────────────
 # HOLD PERIODS
 # When signals auto-exit (in trading days)

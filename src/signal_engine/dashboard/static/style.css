@@ -830,6 +830,47 @@ body {
     font-weight: 500;
 }
 
+/* ─── Trader Tracker: form inputs ──────────────────────────── */
+
+.form-input {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-glass);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 13px;
+    padding: 8px 10px;
+    margin-top: 4px;
+    outline: none;
+    transition: border-color 0.15s ease;
+}
+
+.form-input:focus {
+    border-color: var(--accent-primary);
+}
+
+.form-input::placeholder {
+    color: var(--text-muted);
+}
+
+.action-link {
+    background: none;
+    border: none;
+    color: var(--color-info);
+    cursor: pointer;
+    font-size: 12px;
+    font-family: var(--font-body);
+    padding: 2px 6px;
+}
+
+.action-link:hover {
+    text-decoration: underline;
+}
+
+.action-link.danger {
+    color: var(--color-sell);
+}
+
 /* ─── Animations ───────────────────────────────────────────── */
 
 @keyframes slideUp {

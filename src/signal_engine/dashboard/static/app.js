@@ -63,6 +63,8 @@ document.addEventListener("DOMContentLoaded", () => {
             loadPaperData();
         } else if (tabId === "leaps") {
             loadLEAPSData();
+        } else if (tabId === "traders") {
+            loadTradersData();
         }
     }
 
@@ -721,5 +723,135 @@ document.addEventListener("DOMContentLoaded", () => {
         const pct = ((val + 1) / 2) * 100;
         fillElem.style.width = `${pct}%`;
         fillElem.style.backgroundColor = val > 0 ? "var(--color-buy)" : (val < 0 ? "var(--color-sell)" : "var(--text-muted)");
+    }
+
+    // ── Tab 5: Trader Tracker Logic ──────────────────────────
+    const traderCallForm = document.getElementById("trader-call-form");
+    if (traderCallForm) {
+        traderCallForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const payload = {
+                trader_name: document.getElementById("tc-trader-name").value.trim(),
+                platform: document.getElementById("tc-platform").value,
+                handle: document.getElementById("tc-handle").value.trim() || null,
+                ticker: document.getElementById("tc-ticker").value.trim().toUpperCase(),
+                call_type: document.getElementById("tc-call-type").value,
+                price_at_call: parseFloat(document.getElementById("tc-price").value) || null,
+                target_price: parseFloat(document.getElementById("tc-target").value) || null,
+                timeframe: document.getElementById("tc-timeframe").value,
+                notes: document.getElementById("tc-notes").value.trim() || null,
+            };
+            try {
+                const res = await fetch("/api/traders/calls", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                traderCallForm.reset();
+                loadTradersData();
+            } catch (err) {
+                console.error("Failed to log trader call:", err);
+                alert("Failed to log call — check console for details.");
+            }
+        });
+    }
+
+    async function closeTraderCall(callId) {
+        const exitPriceStr = prompt("Exit price for this call?");
+        if (exitPriceStr === null) return;
+        const exitPrice = parseFloat(exitPriceStr);
+        if (Number.isNaN(exitPrice)) return;
+        try {
+            const res = await fetch(`/api/traders/calls/${callId}/close`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ exit_price: exitPrice }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            loadTradersData();
+        } catch (err) {
+            console.error("Failed to close trader call:", err);
+        }
+    }
+
+    async function deleteTraderCall(callId) {
+        if (!confirm("Delete this logged call?")) return;
+        try {
+            const res = await fetch(`/api/traders/calls/${callId}`, { method: "DELETE" });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            loadTradersData();
+        } catch (err) {
+            console.error("Failed to delete trader call:", err);
+        }
+    }
+    window.closeTraderCall = closeTraderCall;
+    window.deleteTraderCall = deleteTraderCall;
+
+    async function loadTradersData() {
+        try {
+            const [summaryRes, callsRes] = await Promise.all([
+                fetch("/api/traders/summary"),
+                fetch("/api/traders/calls"),
+            ]);
+            const summary = await summaryRes.json();
+            const calls = await callsRes.json();
+
+            document.getElementById("traders-count-label").textContent = `${summary.length} trader${summary.length === 1 ? "" : "s"} tracked`;
+
+            const summaryBody = document.getElementById("traders-summary-body");
+            if (!summary.length) {
+                summaryBody.innerHTML = `<tr><td colspan="7" class="text-center py-4">No traders tracked yet — log a call above.</td></tr>`;
+            } else {
+                summaryBody.innerHTML = "";
+                summary.forEach(s => {
+                    const tr = document.createElement("tr");
+                    const wr = s.win_rate_pct;
+                    const wrStr = wr === null || wr === undefined ? "—" : `${wr.toFixed(1)}%`;
+                    const wrStyle = wr === null || wr === undefined ? "" : (wr >= 50 ? "green-text" : "red-text");
+                    const avgStr = s.avg_outcome_pct === null || s.avg_outcome_pct === undefined ? "—" : `${s.avg_outcome_pct >= 0 ? "+" : ""}${s.avg_outcome_pct.toFixed(2)}%`;
+                    tr.innerHTML = `
+                        <td><strong>${s.trader_name}</strong></td>
+                        <td><span class="badge badge-info">${s.platform}</span></td>
+                        <td>${s.total_calls}</td>
+                        <td>${s.open_calls}</td>
+                        <td>${s.closed_calls}</td>
+                        <td class="${wrStyle}">${wrStr}</td>
+                        <td class="${wrStyle}">${avgStr}</td>
+                    `;
+                    summaryBody.appendChild(tr);
+                });
+            }
+
+            const callsBody = document.getElementById("traders-calls-body");
+            if (!calls.length) {
+                callsBody.innerHTML = `<tr><td colspan="9" class="text-center py-4">No calls logged yet.</td></tr>`;
+            } else {
+                callsBody.innerHTML = "";
+                calls.forEach(c => {
+                    const tr = document.createElement("tr");
+                    const outcomeStr = c.outcome_pct === null || c.outcome_pct === undefined ? "—" : `${c.outcome_pct >= 0 ? "+" : ""}${c.outcome_pct.toFixed(2)}%`;
+                    const outcomeStyle = c.outcome_pct > 0 ? "green-text" : (c.outcome_pct < 0 ? "red-text" : "");
+                    const typeClass = c.call_type === "SELL" ? "sell" : (c.call_type === "WATCH" ? "" : "buy");
+                    const actions = c.status === "OPEN"
+                        ? `<button class="action-link" onclick="closeTraderCall('${c.call_id}')">Close</button><button class="action-link danger" onclick="deleteTraderCall('${c.call_id}')">Delete</button>`
+                        : `<button class="action-link danger" onclick="deleteTraderCall('${c.call_id}')">Delete</button>`;
+                    tr.innerHTML = `
+                        <td>${(c.called_at || "").slice(0, 10)}</td>
+                        <td><strong>${c.trader_name}</strong><br><span style="color: var(--text-muted); font-size: 11px;">${c.platform}${c.handle ? " · " + c.handle : ""}</span></td>
+                        <td>${c.ticker}</td>
+                        <td><span class="rec-pill ${typeClass}" style="padding: 2px 8px;">${c.call_type}</span></td>
+                        <td>${c.price_at_call ? "$" + c.price_at_call.toFixed(2) : "—"}</td>
+                        <td>${c.target_price ? "$" + c.target_price.toFixed(2) : "—"}</td>
+                        <td>${c.status}</td>
+                        <td class="${outcomeStyle}">${outcomeStr}</td>
+                        <td>${actions}</td>
+                    `;
+                    callsBody.appendChild(tr);
+                });
+            }
+        } catch (err) {
+            console.error("Traders tab load failed:", err);
+        }
     }
 });

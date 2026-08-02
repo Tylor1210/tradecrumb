@@ -37,6 +37,7 @@ from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
 from signal_engine.backtest.metrics import compute_directional_accuracy
 from signal_engine.paper_trading.tracker import TradeTracker
 from signal_engine.leaps.candidate_screener import LEAPSScreener
+from signal_engine.trader_tracking.tracker import TraderCallTracker
 
 logger = logging.getLogger("signal_engine.dashboard")
 logging.basicConfig(level=logging.INFO)
@@ -598,6 +599,86 @@ def api_leaps():
     except Exception as e:
         logger.error("LEAPS screening failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/traders/calls")
+def api_traders_list_calls(
+    trader_name: Optional[str] = Query(None),
+    ticker: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+):
+    """List logged trader calls, optionally filtered by trader/ticker/status."""
+    tracker = TraderCallTracker()
+    return tracker.list_calls(trader_name=trader_name, ticker=ticker, status=status)
+
+
+@app.get("/api/traders/summary")
+def api_traders_summary():
+    """Per-trader win rate summary across all logged calls."""
+    tracker = TraderCallTracker()
+    return tracker.get_trader_summary()
+
+
+class TraderCallCreate(BaseModel):
+    trader_name: str
+    platform: str  # discord | x | instagram | other
+    ticker: str
+    call_type: str = "BUY"  # BUY | SELL | WATCH
+    handle: Optional[str] = None
+    price_at_call: Optional[float] = None
+    target_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    timeframe: str = "unspecified"
+    notes: Optional[str] = None
+    source_url: Optional[str] = None
+    called_at: Optional[str] = None  # ISO date/datetime; defaults to now
+
+
+@app.post("/api/traders/calls")
+def api_traders_add_call(call: TraderCallCreate):
+    """Log a trade call you saw from an outside trader (manual entry)."""
+    tracker = TraderCallTracker()
+    called_at = datetime.fromisoformat(call.called_at) if call.called_at else datetime.now()
+    call_id = tracker.add_call(
+        trader_name=call.trader_name,
+        platform=call.platform,
+        ticker=call.ticker,
+        called_at=called_at,
+        call_type=call.call_type,
+        handle=call.handle,
+        price_at_call=call.price_at_call,
+        target_price=call.target_price,
+        stop_price=call.stop_price,
+        timeframe=call.timeframe,
+        notes=call.notes,
+        source_url=call.source_url,
+    )
+    return {"call_id": call_id}
+
+
+class TraderCallClose(BaseModel):
+    exit_price: float
+    notes: Optional[str] = None
+
+
+@app.post("/api/traders/calls/{call_id}/close")
+def api_traders_close_call(call_id: str, body: TraderCallClose):
+    """Close a call with an exit price and compute its outcome %."""
+    tracker = TraderCallTracker()
+    outcome = tracker.close_call(call_id, exit_price=body.exit_price, notes=body.notes)
+    if outcome is None and not tracker.list_calls():
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {"call_id": call_id, "outcome_pct": outcome}
+
+
+@app.delete("/api/traders/calls/{call_id}")
+def api_traders_delete_call(call_id: str):
+    """Delete a logged call (e.g. entered by mistake)."""
+    tracker = TraderCallTracker()
+    deleted = tracker.delete_call(call_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {"deleted": True}
 
 
 # ─────────────────────────────────────────────────────────────

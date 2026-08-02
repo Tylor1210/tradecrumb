@@ -5,6 +5,7 @@ Commands:
   scan      — Run daily signal scan and print ranked results
   backtest  — Run backtest against historical data
   paper     — Run paper trading session
+  live      — Live intraday day-trading trigger (fixed-notional paper trades)
   leaps     — Run LEAPS candidate screener
 
 Usage:
@@ -13,6 +14,8 @@ Usage:
   uv run signal-engine backtest
   uv run signal-engine backtest --grid-search
   uv run signal-engine paper --dry-run
+  uv run signal-engine live --once
+  uv run signal-engine live --poll-minutes 15
   uv run signal-engine leaps
 """
 
@@ -462,6 +465,78 @@ def paper(pt_config, sig_config, wl_config, dry_run):
         console.print("[dim]Run 'signal-engine scan' then pass high-confidence BUY signals to broker.[/dim]")
 
     console.print("[yellow]⚠️  Paper trading only — no live funds involved[/yellow]\n")
+
+
+# ─────────────────────────────────────────────────────────────
+# LIVE (intraday day-trading trigger)
+# ─────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--config", "pt_config", default="paper_trading.yaml", help="Paper trading config")
+@click.option("--signals", "sig_config", default="signals.yaml", help="Signal config")
+@click.option("--watchlist", "wl_config", default="watchlist.yaml", help="Watchlist")
+@click.option("--once", is_flag=True, help="Run a single check then exit (use this from cron)")
+@click.option("--poll-minutes", default=15, type=int, help="Minutes between checks in loop mode")
+@click.option("--force", is_flag=True, help="Ignore market-hours gating (for testing outside market hours)")
+def live(pt_config, sig_config, wl_config, once, poll_minutes, force):
+    """
+    Live intraday day-trading trigger — paper only.
+
+    Re-scans the watchlist and submits fixed-notional ($1,000 by default,
+    see paper_trading.yaml) paper day trades for signals crossing the
+    execution threshold, auto-closing them near the close. Use --once from
+    cron to fire every N minutes during market hours; omit it to run a
+    foreground polling loop.
+    """
+    import time as _time
+
+    from signal_engine.paper_trading.live_trigger import LiveDayTradeTrigger, is_market_hours
+
+    pt_cfg = _load_config(pt_config)
+    sig_cfg = _load_config(sig_config)
+    wl_cfg = _load_config(wl_config)
+
+    console.print()
+    console.rule("[bold cyan]signal-engine live day-trade trigger[/bold cyan]")
+    console.print(
+        f"[dim]Fixed trade size: ${pt_cfg.get('fixed_trade_size', 1000):.0f}"
+        f" | execution threshold: {pt_cfg.get('execution_threshold', 0.55)}"
+        f" | max positions: {pt_cfg.get('max_positions', 10)}[/dim]"
+    )
+    console.print("[yellow]⚠️  Paper trading only — no live funds involved[/yellow]\n")
+
+    try:
+        trigger = LiveDayTradeTrigger(pt_cfg, sig_cfg, wl_cfg)
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    def tick():
+        stamp = datetime.now().isoformat(timespec="seconds")
+        if not force and not is_market_hours():
+            console.print(f"[dim]{stamp} — market closed, skipping[/dim]")
+            return
+        result = trigger.run_once(force=force)
+        for e in result.get("entered", []):
+            console.print(f"[green]{stamp} BUY {e['ticker']} — score {e['score']:.3f} — trade {e['trade_id'][:8]}[/green]")
+        for x in result.get("exited", []):
+            pct = x.get("outcome_pct")
+            pct_str = f"{pct:+.2f}%" if pct is not None else "n/a"
+            console.print(f"[cyan]{stamp} EXIT {x['ticker']} — {pct_str} — trade {x['trade_id'][:8]}[/cyan]")
+        if not result.get("entered") and not result.get("exited"):
+            console.print(f"[dim]{stamp} — no action[/dim]")
+
+    if once:
+        tick()
+        return
+
+    console.print(f"[dim]Polling every {poll_minutes} min during market hours. Ctrl+C to stop.[/dim]\n")
+    try:
+        while True:
+            tick()
+            _time.sleep(poll_minutes * 60)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────

@@ -44,6 +44,9 @@
                 <button class="nav-btn" data-tab="leaps">
                     <i class="fa-solid fa-leaf"></i> LEAPS Screener
                 </button>
+                <button class="nav-btn" data-tab="traders">
+                    <i class="fa-solid fa-users"></i> Trader Tracker
+                </button>
             </nav>
             
             <!-- Connection Status Panel -->
@@ -403,6 +406,128 @@
                     </div>
                 </div>
             </section>
+
+            <!-- TAB 5: TRADER TRACKER -->
+            <section class="tab-view" id="tab-traders">
+                <header class="view-header">
+                    <div>
+                        <h1>Trader Tracker</h1>
+                        <p class="subtitle">Log trade calls you see from Discord/X/Instagram traders (e.g. aristotle_investments) and score them against real price outcomes — manual entry, no scraping or bot integration.</p>
+                    </div>
+                </header>
+
+                <div class="glass-card table-card mb-4">
+                    <div class="card-header">
+                        <h3>Log a Call</h3>
+                    </div>
+                    <form id="trader-call-form" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 16px;">
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Trader Name</label>
+                            <input type="text" id="tc-trader-name" placeholder="aristotle_investments" required class="form-input" style="width: 100%;">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Platform</label>
+                            <select id="tc-platform" class="form-input" style="width: 100%;">
+                                <option value="discord">Discord</option>
+                                <option value="x">X / Twitter</option>
+                                <option value="instagram">Instagram</option>
+                                <option value="other">Other</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Handle / Channel</label>
+                            <input type="text" id="tc-handle" placeholder="#trade-calls" class="form-input" style="width: 100%;">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Ticker</label>
+                            <input type="text" id="tc-ticker" placeholder="AAPL" required class="form-input" style="width: 100%;">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Call Type</label>
+                            <select id="tc-call-type" class="form-input" style="width: 100%;">
+                                <option value="BUY">BUY</option>
+                                <option value="SELL">SELL</option>
+                                <option value="WATCH">WATCH</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Price at Call</label>
+                            <input type="number" step="0.01" id="tc-price" placeholder="185.00" class="form-input" style="width: 100%;">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Target Price</label>
+                            <input type="number" step="0.01" id="tc-target" placeholder="200.00" class="form-input" style="width: 100%;">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-muted);">Timeframe</label>
+                            <select id="tc-timeframe" class="form-input" style="width: 100%;">
+                                <option value="day">Day trade</option>
+                                <option value="swing">Swing</option>
+                                <option value="leaps">LEAPS / long-term</option>
+                                <option value="unspecified" selected>Unspecified</option>
+                            </select>
+                        </div>
+                        <div style="grid-column: span 3;">
+                            <label style="font-size: 11px; color: var(--text-muted);">Notes / thesis</label>
+                            <input type="text" id="tc-notes" placeholder="Why they called it" class="form-input" style="width: 100%;">
+                        </div>
+                        <div style="display: flex; align-items: flex-end;">
+                            <button type="submit" class="btn btn-primary" style="width: 100%;"><i class="fa-solid fa-plus"></i> Log Call</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="glass-card table-card mb-4">
+                    <div class="card-header">
+                        <h3>Trader Leaderboard</h3>
+                        <span class="ticker-count" id="traders-count-label">0 traders tracked</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="traders-summary-table">
+                            <thead>
+                                <tr>
+                                    <th>Trader</th>
+                                    <th>Platform</th>
+                                    <th>Total Calls</th>
+                                    <th>Open</th>
+                                    <th>Closed</th>
+                                    <th>Win Rate</th>
+                                    <th>Avg Outcome</th>
+                                </tr>
+                            </thead>
+                            <tbody id="traders-summary-body">
+                                <tr><td colspan="7" class="text-center py-4">No traders tracked yet — log a call above.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="glass-card table-card">
+                    <div class="card-header">
+                        <h3>All Logged Calls</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="traders-calls-table">
+                            <thead>
+                                <tr>
+                                    <th>Called</th>
+                                    <th>Trader</th>
+                                    <th>Ticker</th>
+                                    <th>Type</th>
+                                    <th>Entry</th>
+                                    <th>Target</th>
+                                    <th>Status</th>
+                                    <th>Outcome</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="traders-calls-body">
+                                <tr><td colspan="9" class="text-center py-4">No calls logged yet.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -502,6 +627,6 @@
     </div>
 
     <!-- Client application logic -->
-    <script src="/static/app.js?v=3"></script>
+    <script src="/static/app.js?v=4"></script>
 </body>
 </html>
