@@ -23,8 +23,11 @@ env/
 .uv/
 
 # === Local data (cache, trade logs, reports) ===
-data/
-reports/
+# Anchored to repo root — unanchored "data/" also matches
+# src/signal_engine/data/ (the real data-client package) and silently
+# excludes it from git. Learned that the hard way; don't unanchor this again.
+/data/
+/reports/
 
 # === IDE ===
 .vscode/
