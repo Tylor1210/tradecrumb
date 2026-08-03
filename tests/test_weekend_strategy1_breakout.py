@@ -8,10 +8,12 @@ from signal_engine.weekend_swing.weekend_swing_signals import PriorWeekBreakoutS
 CONFIG = {
     "strategy_1_breakout": {
         "volume_filter_multiplier": 1.2,
+        "volume_filter_max_multiplier": 3.0,
         "atr_period": 14,
         "atr_stop_multiplier": 0.3,
         "exclude_earnings_week": True,
-    }
+    },
+    "universe": {"max_single_day_move_pct": 50.0},
 }
 
 WEEK_START = pd.Timestamp("2024-01-08")  # Monday
@@ -145,3 +147,44 @@ class TestCheckTrigger:
         signal = strategy.check_trigger(levels, bars)
 
         assert signal.date == pd.Timestamp("2024-01-08 09:30")
+
+    def test_no_trigger_when_volume_exceeds_the_ceiling(self):
+        """Backtesting found >3x volume spikes correlate with WORSE outcomes
+        (exhaustion, not continuation) — the filter is a band, not just a floor."""
+        strategy = PriorWeekBreakoutStrategy(CONFIG)
+        levels = strategy.scan("AAPL", _daily_df(), WEEK_START, _historical_15min_df(), earnings_excluded=set())
+
+        monday_bar = pd.DataFrame(
+            [{"open": 106.5, "high": 108.0, "low": 106.2, "close": 107.0, "volume": 5000.0}],  # 5x baseline
+            index=pd.DatetimeIndex([pd.Timestamp("2024-01-08 09:30")]),
+        )
+
+        assert strategy.check_trigger(levels, monday_bar) is None
+
+    def test_triggers_within_the_volume_band(self):
+        strategy = PriorWeekBreakoutStrategy(CONFIG)
+        levels = strategy.scan("AAPL", _daily_df(), WEEK_START, _historical_15min_df(), earnings_excluded=set())
+
+        monday_bar = pd.DataFrame(
+            [{"open": 106.5, "high": 108.0, "low": 106.2, "close": 107.0, "volume": 2000.0}],  # 2x baseline
+            index=pd.DatetimeIndex([pd.Timestamp("2024-01-08 09:30")]),
+        )
+
+        assert strategy.check_trigger(levels, monday_bar) is not None
+
+
+class TestDataSanityGuard:
+    def test_rejects_ticker_with_anomalous_single_day_move(self):
+        strategy = PriorWeekBreakoutStrategy(CONFIG)
+        df = _daily_df()
+        # Inject a >50% single-day jump — simulates corrupted/unadjusted screener data
+        df.iloc[-5, df.columns.get_loc("close")] = df.iloc[-6]["close"] * 3.0
+
+        levels = strategy.scan("LBGJ", df, WEEK_START, _historical_15min_df(), earnings_excluded=set())
+
+        assert levels is None
+
+    def test_normal_data_is_not_rejected(self):
+        strategy = PriorWeekBreakoutStrategy(CONFIG)
+        levels = strategy.scan("AAPL", _daily_df(), WEEK_START, _historical_15min_df(), earnings_excluded=set())
+        assert levels is not None

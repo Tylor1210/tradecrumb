@@ -205,7 +205,7 @@ class FakeAlpacaClient:
         df = pd.DataFrame(rows, index=idx)
         breakout_ts = pd.Timestamp("2024-01-08 09:30")
         if breakout_ts in df.index:
-            df.loc[breakout_ts] = {"open": 106.2, "high": 108.0, "low": 106.0, "close": 107.5, "volume": 5000.0}
+            df.loc[breakout_ts] = {"open": 106.2, "high": 108.0, "low": 106.0, "close": 107.5, "volume": 2000.0}
         return {ticker: df}
 
 

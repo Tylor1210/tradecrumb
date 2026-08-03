@@ -15,14 +15,31 @@ universe:
   # intraday data is pulled. Tickers whose price isn't within this % of a
   # relevant pivot level are skipped for the expensive 5/15-min pass.
   pivot_proximity_pct: 2.0
+  # Data-sanity guard: reject a ticker if its trailing daily bars contain any
+  # single-day move bigger than this (%) — catches unadjusted-split/corrupted
+  # data from the volume screener (e.g. LBGJ, whose price series swung from
+  # $92 to an average near $12,800 elsewhere in the same 12 months, and whose
+  # one backtested trade alone returned -194%). Applied by every strategy's
+  # scan(), not just Strategy 1.
+  max_single_day_move_pct: 50.0
 
 # ─────────────────────────────────────────────────────────────
 # STRATEGY 1 — Prior-Week Breakout Continuation
 # ─────────────────────────────────────────────────────────────
+# volume_filter_multiplier was a floor-only filter (>1.2x); backtesting found
+# that's backwards above ~3x — huge volume spikes on the trigger candle
+# correlate with WORSE outcomes (exhaustion prints, not continuation), while
+# the >1.2x floor also let too many weak-volume trades through. A 1.5x-3.0x
+# band was the only tested variant with positive expected value per trade
+# (+0.31% vs -2.27% baseline) — see the backtest diagnostics.
 strategy_1_breakout:
-  volume_filter_multiplier: 1.2   # trigger candle volume must exceed this x 20-day avg (same time-of-day slot)
+  volume_filter_multiplier: 1.5      # floor: trigger candle volume must exceed this x 20-day avg (same time-of-day slot)
+  volume_filter_max_multiplier: 3.0  # ceiling: above this, treat as an exhaustion spike and skip
   atr_period: 14
   atr_stop_multiplier: 0.3        # stop = pivot -/+ 0.3 * ATR14 (whichever is tighter than the breakout candle's low/high)
+  # NOTE: widening this reduces whipsaw stop-outs and raises win rate, but
+  # testing (0.3 -> 0.6 -> 1.0) showed EV/trade gets flat-to-worse each step
+  # (losers just lose more) — don't treat win rate alone as progress here.
   exclude_earnings_week: true
 
 # ─────────────────────────────────────────────────────────────

@@ -12,6 +12,23 @@ from typing import Optional
 import pandas as pd
 
 
+def is_data_sane(daily_df: pd.DataFrame, max_single_day_move_pct: float = 50.0) -> bool:
+    """
+    Rejects tickers whose daily bars contain a single-day close-to-close move
+    bigger than `max_single_day_move_pct` — a cheap guard against
+    unadjusted-split or otherwise corrupted data from the volume screener
+    (real backtest example: LBGJ's price swung $92 -> ~$12,800 avg -> $270
+    within the same 12 months; one trade on it alone returned -194%).
+
+    Not a liquidity/quality filter — just a "is this data even usable" check.
+    """
+    if daily_df is None or len(daily_df) < 2:
+        return True  # not enough data to judge; let the normal empty-data checks handle it
+    close = daily_df["close"].astype(float)
+    daily_moves_pct = close.pct_change().abs() * 100
+    return bool(daily_moves_pct.max() <= max_single_day_move_pct)
+
+
 def prior_week_range(daily_df: pd.DataFrame, week_start: pd.Timestamp) -> Optional[tuple[float, float]]:
     """
     Prior week's High/Low (Mon open -> Fri close) for the week immediately

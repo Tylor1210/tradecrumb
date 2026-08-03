@@ -6,6 +6,7 @@ import pytest
 from signal_engine.weekend_swing.levels import (
     atr,
     avg_volume_by_time_slot,
+    is_data_sane,
     overnight_range_proxy,
     prior_week_range,
     swing_pivot,
@@ -144,3 +145,33 @@ class TestAvgVolumeByTimeSlot:
 
     def test_empty_input_returns_empty_dict(self):
         assert avg_volume_by_time_slot(pd.DataFrame()) == {}
+
+
+class TestIsDataSane:
+    def test_accepts_normal_daily_moves(self):
+        df = _daily_df({
+            "2024-01-01": {"open": 100, "high": 101, "low": 99, "close": 100},
+            "2024-01-02": {"open": 100, "high": 103, "low": 99, "close": 102},   # +2%
+            "2024-01-03": {"open": 102, "high": 103, "low": 97, "close": 98},    # -3.9%
+        })
+        assert is_data_sane(df, max_single_day_move_pct=50.0) is True
+
+    def test_rejects_corrupted_split_like_jump(self):
+        df = _daily_df({
+            "2024-01-01": {"open": 90, "high": 93, "low": 89, "close": 92},
+            "2024-01-02": {"open": 92, "high": 300, "low": 91, "close": 271},   # ~194% jump — LBGJ-style anomaly
+            "2024-01-03": {"open": 271, "high": 275, "low": 268, "close": 270},
+        })
+        assert is_data_sane(df, max_single_day_move_pct=50.0) is False
+
+    def test_boundary_move_at_exactly_the_threshold_is_accepted(self):
+        df = _daily_df({
+            "2024-01-01": {"open": 100, "high": 101, "low": 99, "close": 100},
+            "2024-01-02": {"open": 100, "high": 151, "low": 99, "close": 150},  # exactly +50%
+        })
+        assert is_data_sane(df, max_single_day_move_pct=50.0) is True
+
+    def test_insufficient_data_defaults_to_sane(self):
+        df = _daily_df({"2024-01-01": {"open": 100, "high": 101, "low": 99, "close": 100}})
+        assert is_data_sane(df) is True
+        assert is_data_sane(None) is True

@@ -23,6 +23,7 @@ import pandas as pd
 from signal_engine.weekend_swing.levels import (
     atr,
     avg_volume_by_time_slot,
+    is_data_sane,
     overnight_range_proxy,
     swing_pivot,
     prior_week_range,
@@ -65,10 +66,12 @@ class PriorWeekBreakoutStrategy:
 
     def __init__(self, config: dict) -> None:
         cfg = config.get("strategy_1_breakout", {})
-        self.volume_filter_multiplier = cfg.get("volume_filter_multiplier", 1.2)
+        self.volume_filter_multiplier = cfg.get("volume_filter_multiplier", 1.5)
+        self.volume_filter_max_multiplier = cfg.get("volume_filter_max_multiplier", 3.0)
         self.atr_period = cfg.get("atr_period", 14)
         self.atr_stop_multiplier = cfg.get("atr_stop_multiplier", 0.3)
         self.exclude_earnings_week = cfg.get("exclude_earnings_week", True)
+        self.max_single_day_move_pct = config.get("universe", {}).get("max_single_day_move_pct", 50.0)
 
     def scan(
         self,
@@ -80,6 +83,11 @@ class PriorWeekBreakoutStrategy:
     ) -> Optional[dict]:
         """Weekend pass. Returns a levels dict ready for check_trigger(), or None."""
         if self.exclude_earnings_week and ticker.upper() in earnings_excluded:
+            return None
+
+        if not is_data_sane(daily_df, self.max_single_day_move_pct):
+            logger.warning("%s skipped: daily bars contain a move >%.0f%% — likely corrupted/unadjusted data",
+                            ticker, self.max_single_day_move_pct)
             return None
 
         week_range = prior_week_range(daily_df, week_start)
@@ -128,7 +136,9 @@ class PriorWeekBreakoutStrategy:
             if not avg_vol or avg_vol <= 0:
                 continue
             vol_ratio = volume / avg_vol
-            if vol_ratio <= self.volume_filter_multiplier:
+            # Band, not just a floor: backtesting found volume spikes above the
+            # ceiling correlate with WORSE outcomes (exhaustion, not continuation).
+            if vol_ratio <= self.volume_filter_multiplier or vol_ratio > self.volume_filter_max_multiplier:
                 continue
 
             conviction = round(min(1.0, 0.5 + 0.25 * (vol_ratio - self.volume_filter_multiplier)), 4)
@@ -172,6 +182,7 @@ class OvernightRangeBreakoutStrategy:
         self.atr_range_multiplier = cfg.get("atr_range_multiplier", 1.5)
         self.atr_period = cfg.get("atr_period", 14)
         self.trigger_window_minutes = cfg.get("trigger_window_minutes", 30)
+        self.max_single_day_move_pct = config.get("universe", {}).get("max_single_day_move_pct", 50.0)
 
     def scan(
         self,
@@ -179,6 +190,11 @@ class OvernightRangeBreakoutStrategy:
         daily_df: pd.DataFrame,
         week_start: pd.Timestamp,
     ) -> Optional[dict]:
+        if not is_data_sane(daily_df, self.max_single_day_move_pct):
+            logger.warning("%s skipped: daily bars contain a move >%.0f%% — likely corrupted/unadjusted data",
+                            ticker, self.max_single_day_move_pct)
+            return None
+
         proxy = overnight_range_proxy(daily_df, week_start)
         if proxy is None:
             return None
@@ -266,6 +282,7 @@ class GapStrengthStrategy:
         configured = {t.upper() for t in cfg.get("restricted_tickers", ["SPY", "QQQ"])}
         # Code-enforced intersection with the hard v1 scope, per spec.
         self.allowed_tickers = (configured & self._HARD_RESTRICTED_TICKERS) or self._HARD_RESTRICTED_TICKERS
+        self.max_single_day_move_pct = config.get("universe", {}).get("max_single_day_move_pct", 50.0)
 
     def scan(
         self,
@@ -274,6 +291,10 @@ class GapStrengthStrategy:
         week_start: pd.Timestamp,
     ) -> Optional[dict]:
         if ticker.upper() not in self.allowed_tickers:
+            return None
+        if not is_data_sane(daily_df, self.max_single_day_move_pct):
+            logger.warning("%s skipped: daily bars contain a move >%.0f%% — likely corrupted/unadjusted data",
+                            ticker, self.max_single_day_move_pct)
             return None
         pivot = swing_pivot(daily_df, week_start)
         if pivot is None:
