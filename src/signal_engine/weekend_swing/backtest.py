@@ -42,6 +42,7 @@ class WeekendSwingTrade:
     exit_reason: str  # "stopped_out" | "friday_close"
     return_pct: float
     gap_type: Optional[str] = None  # strategy 3 only
+    breakdown: dict = field(default_factory=dict)  # the triggering signal's breakdown (volume ratio, ATR, etc.)
 
 
 @dataclass
@@ -161,6 +162,10 @@ class WeekendSwingBacktester:
     # ── Strategy 1 ────────────────────────────────────────────────────────
 
     def run_strategy_1(self, tickers: list, start: pd.Timestamp, end: pd.Timestamp) -> WeekendSwingBacktestMetrics:
+        return _compute_metrics(self.collect_strategy_1_trades(tickers, start, end), "prior_week_breakout")
+
+    def collect_strategy_1_trades(self, tickers: list, start: pd.Timestamp, end: pd.Timestamp) -> list:
+        """Raw per-trade results (for diagnostics/analysis) — run_strategy_1() aggregates these into metrics."""
         from signal_engine.weekend_swing.weekend_swing_signals import PriorWeekBreakoutStrategy
 
         strategy = PriorWeekBreakoutStrategy(self.config)
@@ -202,13 +207,18 @@ class WeekendSwingBacktester:
                     entry_time=signal.date, entry_price=signal.entry_price, stop_price=signal.stop_price,
                     exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
                     return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
+                    breakdown=signal.breakdown,
                 ))
 
-        return _compute_metrics(trades, "prior_week_breakout")
+        return trades
 
     # ── Strategy 2 ────────────────────────────────────────────────────────
 
     def run_strategy_2(self, tickers: list, start: pd.Timestamp, end: pd.Timestamp) -> WeekendSwingBacktestMetrics:
+        return _compute_metrics(self.collect_strategy_2_trades(tickers, start, end), "overnight_range_breakout")
+
+    def collect_strategy_2_trades(self, tickers: list, start: pd.Timestamp, end: pd.Timestamp) -> list:
+        """Raw per-trade results (for diagnostics/analysis) — run_strategy_2() aggregates these into metrics."""
         from signal_engine.weekend_swing.weekend_swing_signals import OvernightRangeBreakoutStrategy
 
         strategy = OvernightRangeBreakoutStrategy(self.config)
@@ -248,9 +258,10 @@ class WeekendSwingBacktester:
                     entry_time=signal.date, entry_price=signal.entry_price, stop_price=signal.stop_price,
                     exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
                     return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
+                    breakdown=signal.breakdown,
                 ))
 
-        return _compute_metrics(trades, "overnight_range_breakout")
+        return trades
 
     # ── Strategy 3 ────────────────────────────────────────────────────────
 
@@ -258,6 +269,14 @@ class WeekendSwingBacktester:
         self, tickers: list, start: pd.Timestamp, end: pd.Timestamp
     ) -> tuple:
         """Returns (gap_and_go_metrics, gap_and_fail_metrics) — never combined."""
+        go_trades, fail_trades = self.collect_strategy_3_trades(tickers, start, end)
+        return (
+            _compute_metrics(go_trades, "gap_strength", gap_type="gap_and_go"),
+            _compute_metrics(fail_trades, "gap_strength", gap_type="gap_and_fail"),
+        )
+
+    def collect_strategy_3_trades(self, tickers: list, start: pd.Timestamp, end: pd.Timestamp) -> tuple:
+        """Raw (go_trades, fail_trades) — run_strategy_3() aggregates these into metrics."""
         from signal_engine.weekend_swing.weekend_swing_signals import GapStrengthStrategy
 
         strategy = GapStrengthStrategy(self.config)
@@ -305,13 +324,11 @@ class WeekendSwingBacktester:
                     exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
                     return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
                     gap_type=signal.breakdown.get("gap_type"),
+                    breakdown=signal.breakdown,
                 )
                 if trade.gap_type == "gap_and_go":
                     go_trades.append(trade)
                 else:
                     fail_trades.append(trade)
 
-        return (
-            _compute_metrics(go_trades, "gap_strength", gap_type="gap_and_go"),
-            _compute_metrics(fail_trades, "gap_strength", gap_type="gap_and_fail"),
-        )
+        return go_trades, fail_trades
