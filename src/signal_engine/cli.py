@@ -2,11 +2,14 @@
 signal-engine CLI entry points.
 
 Commands:
-  scan      — Run daily signal scan and print ranked results
-  backtest  — Run backtest against historical data
-  paper     — Run paper trading session
-  live      — Live intraday day-trading trigger (fixed-notional paper trades)
-  leaps     — Run LEAPS candidate screener
+  scan             — Run daily signal scan and print ranked results
+  backtest         — Run backtest against historical data
+  paper            — Run paper trading session
+  live             — Live intraday day-trading trigger (fixed-notional paper trades)
+  leaps            — Run LEAPS candidate screener
+  weekend-scan     — Weekend Swing Signals: Sat/Sun watchlist scan (output only)
+  weekend-monitor  — Weekend Swing Signals: Monday-morning trigger checker (logs only)
+  weekend-backtest — Weekend Swing Signals: backtest all 3 strategies
 
 Usage:
   uv run signal-engine scan
@@ -17,6 +20,9 @@ Usage:
   uv run signal-engine live --once
   uv run signal-engine live --poll-minutes 15
   uv run signal-engine leaps
+  uv run signal-engine weekend-scan
+  uv run signal-engine weekend-monitor --once
+  uv run signal-engine weekend-backtest
 """
 
 import logging
@@ -691,6 +697,341 @@ def leaps(sig_config, wl_config, top):
         console.print("[dim]   See: src/signal_engine/leaps/README_LEAPS.md[/dim]\n")
 
 
+
+
+# ─────────────────────────────────────────────────────────────
+# WEEKEND SWING SIGNALS
+# ─────────────────────────────────────────────────────────────
+# Independent weekly strategy lane: weekend scan -> Monday trigger -> stop ->
+# Friday-close-or-stopped-out exit. NOT wired into the daily scan/live-trigger
+# flow — see src/signal_engine/weekend_swing/weekend_swing_signals.py.
+# Signal logging + backtesting only in this pass — no paper-trading
+# submission and no persistence (Parts 5/6 are a deferred follow-up).
+
+@main.command(name="weekend-scan")
+@click.option("--config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config")
+def weekend_scan(ws_config):
+    """
+    Weekend Swing Signals — Saturday/Sunday scan.
+
+    Builds the top-100-most-active + core universe, runs the cheap
+    (daily-bar-only) pivot-proximity filter across all 3 strategies, and
+    prints the resulting watchlist. Output only — nothing is persisted or
+    submitted to trading in this pass.
+    """
+    import pandas as pd
+
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.data.news_client import FinnhubNewsClient
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+    from signal_engine.weekend_swing.scan import build_weekend_watchlist, next_or_current_monday
+
+    ws_cfg = _load_config(ws_config)
+
+    console.print()
+    console.rule("[bold cyan]signal-engine weekend swing scan[/bold cyan]")
+
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    finnhub = None
+    try:
+        finnhub = FinnhubNewsClient()
+    except EnvironmentError:
+        console.print("[dim]Finnhub not configured — earnings exclusion disabled[/dim]")
+
+    week_start = next_or_current_monday(pd.Timestamp.now(tz="UTC"))
+    bar_store = IntradayBarStore(alpaca)
+
+    with console.status("[bold green]Building universe + running cheap pivot-proximity scan..."):
+        result = build_weekend_watchlist(ws_cfg, alpaca, finnhub, bar_store, week_start)
+
+    console.print(f"[dim]✓ Universe: {result['universe_size']} tickers | Week of {result['week_start'].date()}[/dim]")
+
+    if result["skipped"]:
+        console.print(f"[yellow]⚠ {len(result['skipped'])} tickers skipped[/yellow]")
+        for ticker, reason in result["skipped"][:20]:
+            console.print(f"[dim]  - {ticker}: {reason}[/dim]")
+        if len(result["skipped"]) > 20:
+            console.print(f"[dim]  ... and {len(result['skipped']) - 20} more (see logs)[/dim]")
+
+    candidates = result["candidates"]
+    if not candidates:
+        console.print("\n[yellow]No candidates within the pivot-proximity filter this week.[/yellow]\n")
+        return
+
+    table = Table(
+        title=f"Weekend Swing Watchlist — week of {result['week_start'].date()}",
+        box=box.ROUNDED, show_lines=False,
+    )
+    table.add_column("Ticker", style="bold")
+    table.add_column("Strategy")
+    table.add_column("Pivot High", justify="right")
+    table.add_column("Pivot Low", justify="right")
+    table.add_column("Current", justify="right")
+    table.add_column("Dist %", justify="right")
+    table.add_column("Earnings", justify="center")
+    table.add_column("Data Note")
+
+    for c in candidates:
+        table.add_row(
+            c["ticker"], c["strategy"],
+            f"${c['pivot_high']:.2f}", f"${c['pivot_low']:.2f}",
+            f"${c['current_price']:.2f}", f"{c['distance_pct']:.2f}%",
+            "[red]⚠ YES[/red]" if c["earnings_excluded"] else "",
+            c["data_quality"] or "",
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[dim]{len(candidates)} candidates ready for Monday's trigger check "
+        f"(run: signal-engine weekend-monitor)[/dim]\n"
+    )
+
+
+@main.command(name="weekend-monitor")
+@click.option("--config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config")
+@click.option("--once", is_flag=True, help="Run a single check then exit (use this from cron)")
+@click.option("--poll-minutes", default=5, type=int, help="Minutes between checks in loop mode")
+def weekend_monitor(ws_config, once, poll_minutes):
+    """
+    Weekend Swing Signals — Monday-morning trigger checker.
+
+    Rebuilds the same cheap shortlist as weekend-scan, then pulls intraday
+    5/15-min data ONLY for shortlisted tickers and checks each strategy's
+    real trigger condition. Logs triggered signals — no paper-trading
+    submission and no DB write in this pass (both are Part 5/6, deferred).
+    """
+    import time as _time
+
+    import pandas as pd
+
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.data.news_client import FinnhubNewsClient
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+    from signal_engine.weekend_swing.scan import build_weekend_watchlist, next_or_current_monday
+    from signal_engine.weekend_swing.weekend_swing_signals import (
+        GapStrengthStrategy,
+        OvernightRangeBreakoutStrategy,
+        PriorWeekBreakoutStrategy,
+    )
+
+    ws_cfg = _load_config(ws_config)
+
+    console.print()
+    console.rule("[bold cyan]signal-engine weekend swing — Monday trigger monitor[/bold cyan]")
+    console.print("[yellow]⚠️  Signal logging only — no paper-trading submission in this pass[/yellow]\n")
+
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    finnhub = None
+    try:
+        finnhub = FinnhubNewsClient()
+    except EnvironmentError:
+        pass
+
+    bar_store = IntradayBarStore(alpaca)
+    week_start = next_or_current_monday(pd.Timestamp.now(tz="UTC"))
+
+    with console.status("[bold green]Rebuilding shortlist (cheap daily-bar pass)..."):
+        watchlist = build_weekend_watchlist(ws_cfg, alpaca, finnhub, bar_store, week_start)
+
+    candidates = watchlist["candidates"]
+    console.print(f"[dim]✓ {len(candidates)} shortlisted ticker/strategy pairs for this Monday[/dim]\n")
+
+    if not candidates:
+        console.print("[yellow]Nothing shortlisted — nothing to monitor.[/yellow]")
+        return
+
+    strategies = {
+        "prior_week_breakout": PriorWeekBreakoutStrategy(ws_cfg),
+        "overnight_range_breakout": OvernightRangeBreakoutStrategy(ws_cfg),
+        "gap_strength": GapStrengthStrategy(ws_cfg),
+    }
+    already_triggered = set()  # (ticker, strategy) pairs — don't re-log the same trigger
+
+    def tick():
+        stamp = datetime.now().isoformat(timespec="seconds")
+        fired_any = False
+        for c in candidates:
+            key = (c["ticker"], c["strategy"])
+            if key in already_triggered:
+                continue
+
+            ticker, strategy_name = c["ticker"], c["strategy"]
+            strategy = strategies[strategy_name]
+
+            try:
+                if strategy_name == "prior_week_breakout":
+                    daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=90), week_start)
+                    hist_15 = bar_store.get_bars(ticker, "15Min", week_start - pd.Timedelta(days=40), week_start)
+                    levels = strategy.scan(ticker, daily_df, week_start, hist_15, watchlist["earnings_excluded"])
+                    if levels is None:
+                        continue
+                    monday_bars = bar_store.get_bars(ticker, "15Min", week_start, pd.Timestamp.now(tz="UTC"))
+                    monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                    signal = strategy.check_trigger(levels, monday_bars)
+
+                elif strategy_name == "overnight_range_breakout":
+                    daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=60), week_start)
+                    levels = strategy.scan(ticker, daily_df, week_start)
+                    if levels is None:
+                        continue
+                    monday_bars = bar_store.get_bars(ticker, "5Min", week_start, pd.Timestamp.now(tz="UTC"))
+                    monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                    if monday_bars.empty:
+                        continue
+                    signal = strategy.check_trigger(levels, monday_bars, monday_bars.index.min())
+
+                else:  # gap_strength
+                    daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=60), week_start)
+                    levels = strategy.scan(ticker, daily_df, week_start)
+                    if levels is None:
+                        continue
+                    monday_daily = daily_df.loc[daily_df.index >= week_start]
+                    if monday_daily.empty:
+                        continue
+                    monday_open = float(monday_daily.iloc[0]["open"])
+                    monday_bars = bar_store.get_bars(ticker, "5Min", week_start, pd.Timestamp.now(tz="UTC"))
+                    monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                    if monday_bars.empty:
+                        continue
+                    signal = strategy.check_trigger(levels, monday_open, monday_bars.iloc[0])
+
+            except Exception as e:
+                console.print(f"[dim]{stamp} {ticker}/{strategy_name} check failed: {e}[/dim]")
+                continue
+
+            if signal is not None:
+                already_triggered.add(key)
+                fired_any = True
+                color = "green" if signal.direction == "long" else "red"
+                gap_note = f" [{signal.breakdown.get('gap_type')}]" if signal.breakdown.get("gap_type") else ""
+                console.print(
+                    f"[{color}]{stamp} TRIGGER {ticker} ({strategy_name}{gap_note}) — "
+                    f"{signal.direction.upper()} @ ${signal.entry_price:.2f} stop ${signal.stop_price:.2f}[/{color}]"
+                )
+
+        if not fired_any:
+            console.print(
+                f"[dim]{stamp} — no new triggers ({len(already_triggered)}/{len(candidates)} fired so far)[/dim]"
+            )
+
+    if once:
+        tick()
+        return
+
+    console.print(f"[dim]Polling every {poll_minutes} min. Ctrl+C to stop.[/dim]\n")
+    try:
+        while True:
+            tick()
+            _time.sleep(poll_minutes * 60)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped.[/yellow]")
+
+
+@main.command(name="weekend-backtest")
+@click.option("--config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config")
+@click.option("--tickers", default=None, help="Comma-separated ticker override (default: core + N from screener, per config)")
+@click.option("--months", default=None, type=int, help="Lookback months override (default: from config)")
+def weekend_backtest(ws_config, tickers, months):
+    """
+    Weekend Swing Signals — backtest all 3 strategies against cached
+    historical data.
+
+    First run fetches and permanently caches intraday bars
+    (data/weekend_swing_bars/) — subsequent runs over the same range make
+    no new API calls.
+    """
+    import pandas as pd
+
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.data.news_client import FinnhubNewsClient
+    from signal_engine.weekend_swing.backtest import WeekendSwingBacktester
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+
+    ws_cfg = _load_config(ws_config)
+    bt_cfg = ws_cfg.get("backtest", {})
+
+    console.print()
+    console.rule("[bold cyan]signal-engine weekend swing backtest[/bold cyan]")
+
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    finnhub = None
+    try:
+        finnhub = FinnhubNewsClient()
+    except EnvironmentError:
+        console.print("[dim]Finnhub not configured — earnings exclusion disabled for this backtest[/dim]")
+
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",")]
+    else:
+        core = ws_cfg.get("universe", {}).get("core_tickers", [])
+        initial_size = bt_cfg.get("initial_universe_size", 20)
+        extra_needed = max(0, initial_size - len(core))
+        with console.status("[bold green]Fetching most-active tickers for backtest universe..."):
+            most_active = alpaca.get_most_active_symbols(top=max(extra_needed * 3, 20))
+        extra = [s for s in most_active if s not in core][:extra_needed]
+        ticker_list = core + extra
+
+    lookback_months = months or bt_cfg.get("lookback_months", 12)
+    end = pd.Timestamp.now(tz="UTC").normalize()
+    start = end - pd.DateOffset(months=lookback_months)
+
+    console.print(f"[dim]Universe ({len(ticker_list)}): {', '.join(ticker_list)}[/dim]")
+    console.print(f"[dim]Lookback: {start.date()} -> {end.date()} ({lookback_months} months)[/dim]")
+    console.print("[dim]First run fetches + permanently caches intraday bars — this can take a while.[/dim]\n")
+
+    bar_store = IntradayBarStore(alpaca)
+    backtester = WeekendSwingBacktester(ws_cfg, bar_store, finnhub)
+
+    with console.status("[bold green]Backtesting Strategy 1 (Prior-Week Breakout Continuation)..."):
+        s1_metrics = backtester.run_strategy_1(ticker_list, start, end)
+    with console.status("[bold green]Backtesting Strategy 2 (Overnight Range Breakout)..."):
+        s2_metrics = backtester.run_strategy_2(ticker_list, start, end)
+    with console.status("[bold green]Backtesting Strategy 3 (Gap Strength/Fade — SPY/QQQ only)..."):
+        s3_go, s3_fail = backtester.run_strategy_3(ticker_list, start, end)
+
+    table = Table(title="Weekend Swing Backtest Results", box=box.ROUNDED)
+    table.add_column("Strategy")
+    table.add_column("Trades", justify="right")
+    table.add_column("Win Rate", justify="right")
+    table.add_column("Avg Win", justify="right")
+    table.add_column("Avg Loss", justify="right")
+    table.add_column("Max DD", justify="right")
+
+    for label, m in [
+        ("1: Prior-Week Breakout", s1_metrics),
+        ("2: Overnight Range Breakout", s2_metrics),
+        ("3: Gap-and-Go (SPY/QQQ)", s3_go),
+        ("3: Gap-and-Fail (SPY/QQQ)", s3_fail),
+    ]:
+        table.add_row(
+            label, str(m.trade_count),
+            f"{m.win_rate_pct:.1f}%" if m.trade_count else "n/a",
+            f"+{m.avg_win_pct:.2f}%" if m.trade_count else "n/a",
+            f"{m.avg_loss_pct:.2f}%" if m.trade_count else "n/a",
+            f"{m.max_drawdown_pct:.2f}%" if m.trade_count else "n/a",
+        )
+
+    console.print(table)
+    console.print(
+        "\n[yellow]⚠️  Strategy 2 uses a regular-session proxy for overnight range "
+        "(no true after-hours data on the free IEX feed) — treat its numbers accordingly.[/yellow]"
+    )
+    console.print("[dim]Paper trading only — no live funds involved. Output only, nothing submitted.[/dim]\n")
 
 
 # ─────────────────────────────────────────────────────────────

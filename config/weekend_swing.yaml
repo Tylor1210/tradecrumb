@@ -1,0 +1,55 @@
+# Weekend Swing Signals Configuration
+# Weekly strategy lane: weekend scan -> Monday trigger -> stop -> Friday-close-or-stopped-out exit.
+# Independent of the daily composite scan/paper-live loop — see README notes in
+# src/signal_engine/weekend_swing/ for how this plugs (or deliberately doesn't) into those.
+
+# ─────────────────────────────────────────────────────────────
+# UNIVERSE
+# ─────────────────────────────────────────────────────────────
+universe:
+  top_n: 100              # most-active tickers pulled from Alpaca's screener
+  by: volume              # "volume" or "trades" — see alpaca.data.requests.MostActivesBy
+  # Always included regardless of screener ranking.
+  core_tickers: [SPY, QQQ, NVDA, MSFT, GOOG]
+  # Cheap (daily-bar-only) filter applied to the full universe before any
+  # intraday data is pulled. Tickers whose price isn't within this % of a
+  # relevant pivot level are skipped for the expensive 5/15-min pass.
+  pivot_proximity_pct: 2.0
+
+# ─────────────────────────────────────────────────────────────
+# STRATEGY 1 — Prior-Week Breakout Continuation
+# ─────────────────────────────────────────────────────────────
+strategy_1_breakout:
+  volume_filter_multiplier: 1.2   # trigger candle volume must exceed this x 20-day avg (same time-of-day slot)
+  atr_period: 14
+  atr_stop_multiplier: 0.3        # stop = pivot -/+ 0.3 * ATR14 (whichever is tighter than the breakout candle's low/high)
+  exclude_earnings_week: true
+
+# ─────────────────────────────────────────────────────────────
+# STRATEGY 2 — Overnight Range Breakout
+# ─────────────────────────────────────────────────────────────
+# CAVEAT: Alpaca's free IEX feed does not reliably carry true Sunday-night /
+# extended-hours prints (no SIP-equivalent 24hr session). "Overnight range" is
+# therefore approximated as Friday's regular-session close through Monday's
+# regular-session open — NOT a true overnight/globex-style session. Every
+# signal this strategy produces is tagged with this caveat in its breakdown.
+strategy_2_overnight:
+  atr_range_multiplier: 1.5       # skip ticker if overnight range > this x (ATR14 / 24)
+  atr_period: 14
+  trigger_window_minutes: 30      # only trigger within the first N minutes of Monday's regular session
+
+# ─────────────────────────────────────────────────────────────
+# STRATEGY 3 — Gap Strength / Gap Fade
+# ─────────────────────────────────────────────────────────────
+strategy_3_gap:
+  restricted_tickers: [SPY, QQQ]  # v1 scope — enforced in code, not just here
+  atr_period: 14
+
+# ─────────────────────────────────────────────────────────────
+# BACKTEST DEFAULTS
+# ─────────────────────────────────────────────────────────────
+backtest:
+  initial_universe_size: 20       # core 5 + 15 more from the screener, for the first validation pass
+  lookback_months: 12
+  initial_capital: 100000.0
+  position_size_pct: 5.0          # % of portfolio per trade, matches config/backtest.yaml convention
