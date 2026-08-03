@@ -47,6 +47,9 @@
                 <button class="nav-btn" data-tab="traders">
                     <i class="fa-solid fa-users"></i> Trader Tracker
                 </button>
+                <button class="nav-btn" data-tab="weekend">
+                    <i class="fa-solid fa-calendar-week"></i> Weekend Swing
+                </button>
             </nav>
             
             <!-- Connection Status Panel -->
@@ -530,7 +533,185 @@
                     </div>
                 </div>
             </section>
+
+            <!-- TAB 6: WEEKEND SWING SIGNALS -->
+            <section class="tab-view" id="tab-weekend">
+                <header class="view-header">
+                    <div>
+                        <h1>Weekend Swing Signals</h1>
+                        <p class="subtitle">Weekly strategy lane — weekend pivot scan &rarr; Monday trigger &rarr; stop or Friday close. Independent of the daily scan above; paper trading only.</p>
+                    </div>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" id="btn-weekend-history"><i class="fa-solid fa-clock-rotate-left"></i> History</button>
+                        <button class="btn btn-secondary" id="btn-weekend-check-triggers"><i class="fa-solid fa-bolt"></i> Check Triggers Now</button>
+                        <button class="btn btn-primary" id="btn-weekend-run-scan"><i class="fa-solid fa-play"></i> Run Weekend Scan</button>
+                    </div>
+                </header>
+
+                <!-- Weekend Scan Results -->
+                <div class="glass-card table-card mb-4">
+                    <div class="card-header">
+                        <h3>Weekend Scan Results</h3>
+                        <span class="ticker-count" id="weekend-scan-count-label">0 candidates loaded</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="weekend-scan-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" data-sort="ticker">Ticker <i class="fa-solid fa-sort"></i></th>
+                                    <th>Strategy</th>
+                                    <th>Pivot High</th>
+                                    <th>Pivot Low</th>
+                                    <th>Current</th>
+                                    <th class="sortable" data-sort="distance_pct">Dist % <i class="fa-solid fa-sort"></i></th>
+                                    <th>Earnings</th>
+                                    <th>Data Note</th>
+                                </tr>
+                            </thead>
+                            <tbody id="weekend-scan-body">
+                                <tr><td colspan="8" class="text-center py-4">No scan loaded yet — click &quot;Run Weekend Scan&quot;.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Monday Trigger Feed -->
+                <div class="glass-card table-card mb-4">
+                    <div class="card-header">
+                        <h3>Monday Trigger Feed</h3>
+                        <div style="display:flex; align-items:center; gap:12px;">
+                            <span class="ticker-count" id="weekend-triggered-count-label">0 triggered</span>
+                            <button class="btn btn-primary" id="btn-weekend-submit-selected" style="padding: 6px 14px; font-size:12px;" disabled>
+                                <i class="fa-solid fa-paper-plane"></i> Submit Selected to Paper Trading
+                            </button>
+                        </div>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="weekend-triggered-table">
+                            <thead>
+                                <tr>
+                                    <th><input type="checkbox" id="weekend-select-all"></th>
+                                    <th>Ticker</th>
+                                    <th>Strategy</th>
+                                    <th>Direction</th>
+                                    <th>Entry</th>
+                                    <th>Stop</th>
+                                    <th>Triggered</th>
+                                </tr>
+                            </thead>
+                            <tbody id="weekend-triggered-body">
+                                <tr><td colspan="7" class="text-center py-4">No signals triggered yet — click &quot;Check Triggers Now&quot;.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Active Positions -->
+                <div class="glass-card table-card">
+                    <div class="card-header">
+                        <h3>Active Positions</h3>
+                        <span class="ticker-count" id="weekend-active-count-label">0 open</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="premium-table" id="weekend-active-table">
+                            <thead>
+                                <tr>
+                                    <th>Ticker</th>
+                                    <th>Strategy</th>
+                                    <th>Direction</th>
+                                    <th>Entry</th>
+                                    <th>Qty</th>
+                                    <th>Notional</th>
+                                    <th>Submitted</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="weekend-active-body">
+                                <tr><td colspan="8" class="text-center py-4">No active positions.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
         </main>
+    </div>
+
+    <!-- WEEKEND SWING: SUBMIT CONFIRMATION MODAL -->
+    <div class="modal-overlay" id="weekend-submit-modal">
+        <div class="glass-card modal-container" style="max-width: 680px;">
+            <header class="modal-header">
+                <div>
+                    <h2 style="font-size: 22px;">Confirm Paper Trade Submission</h2>
+                    <p>Review before sending to your Alpaca paper account. This cannot be undone from here.</p>
+                </div>
+                <button class="modal-close" id="btn-close-weekend-submit-modal">&times;</button>
+            </header>
+            <div class="modal-body">
+                <div class="table-wrapper">
+                    <table class="premium-table" id="weekend-submit-confirm-table">
+                        <thead>
+                            <tr><th>Ticker</th><th>Strategy</th><th>Direction</th><th>Entry</th><th>Stop</th><th>Est. Size</th></tr>
+                        </thead>
+                        <tbody id="weekend-submit-confirm-body"></tbody>
+                    </table>
+                </div>
+                <div style="margin-top:20px; display:flex; justify-content:flex-end; gap:12px;">
+                    <button class="btn btn-secondary" id="btn-weekend-submit-cancel">Cancel</button>
+                    <button class="btn btn-primary" id="btn-weekend-submit-confirm"><i class="fa-solid fa-check"></i> Confirm &amp; Submit</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- WEEKEND SWING: HISTORY MODAL -->
+    <div class="modal-overlay" id="weekend-history-modal">
+        <div class="glass-card modal-container" style="max-width: 1040px;">
+            <header class="modal-header">
+                <div>
+                    <h2 style="font-size: 22px;">Weekend Swing Trade History</h2>
+                    <p>Closed trades from this feature only — not mixed with the daily paper-trading log.</p>
+                </div>
+                <button class="modal-close" id="btn-close-weekend-history-modal">&times;</button>
+            </header>
+            <div class="modal-body">
+                <div style="display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap; align-items:flex-end;">
+                    <div>
+                        <label style="font-size: 11px; color: var(--text-muted); display:block; margin-bottom:4px;">Strategy</label>
+                        <select id="weekend-history-strategy-filter" class="form-input">
+                            <option value="">All strategies</option>
+                            <option value="prior_week_breakout">1: Prior-Week Breakout</option>
+                            <option value="overnight_range_breakout">2: Overnight Range Breakout</option>
+                            <option value="gap_strength">3: Gap Strength/Fade</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size: 11px; color: var(--text-muted); display:block; margin-bottom:4px;">From</label>
+                        <input type="date" id="weekend-history-date-from" class="form-input">
+                    </div>
+                    <div>
+                        <label style="font-size: 11px; color: var(--text-muted); display:block; margin-bottom:4px;">To</label>
+                        <input type="date" id="weekend-history-date-to" class="form-input">
+                    </div>
+                    <button class="btn btn-secondary" id="btn-weekend-history-apply-filters" style="padding: 8px 14px; font-size: 12px;">Apply Filters</button>
+                </div>
+
+                <div class="metrics-grid" id="weekend-history-summary" style="margin-bottom: 24px;"></div>
+
+                <div class="table-wrapper">
+                    <table class="premium-table" id="weekend-history-table">
+                        <thead>
+                            <tr>
+                                <th>Opened</th><th>Ticker</th><th>Strategy</th><th>Direction</th>
+                                <th>Entry</th><th>Exit</th><th>Reason</th><th>P/L %</th>
+                            </tr>
+                        </thead>
+                        <tbody id="weekend-history-body">
+                            <tr><td colspan="8" class="text-center py-4">No closed trades yet.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- SIGNAL BREAKDOWN DETAIL MODAL -->
@@ -638,6 +819,6 @@
     </div>
 
     <!-- Client application logic -->
-    <script src="/static/app.js?v=5"></script>
+    <script src="/static/app.js?v=6"></script>
 </body>
 </html>

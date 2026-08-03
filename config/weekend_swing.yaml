@@ -70,3 +70,11 @@ backtest:
   lookback_months: 12
   initial_capital: 100000.0
   position_size_pct: 5.0          # % of portfolio per trade, matches config/backtest.yaml convention
+
+# ─────────────────────────────────────────────────────────────
+# EXECUTION (paper only — see paper_trading/broker.py)
+# ─────────────────────────────────────────────────────────────
+# Position sizing used ONLY when a signal is explicitly submitted from the
+# dashboard's Weekend Swing tab. Nothing here ever triggers automatically.
+execution:
+  fixed_trade_size: 1000.0        # $ notional per submitted signal, same convention as paper_trading.yaml's live day-trading

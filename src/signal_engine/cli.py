@@ -705,8 +705,11 @@ def leaps(sig_config, wl_config, top):
 # Independent weekly strategy lane: weekend scan -> Monday trigger -> stop ->
 # Friday-close-or-stopped-out exit. NOT wired into the daily scan/live-trigger
 # flow — see src/signal_engine/weekend_swing/weekend_swing_signals.py.
-# Signal logging + backtesting only in this pass — no paper-trading
-# submission and no persistence (Parts 5/6 are a deferred follow-up).
+# Scan results and triggered signals persist to data/weekend_swing.db and
+# surface in the dashboard's Weekend Swing tab. Paper-trading submission
+# only happens when explicitly triggered from that tab (see
+# dashboard/server.py's /api/weekend-swing/submit) — these CLI commands
+# never submit an order on their own.
 
 @main.command(name="weekend-scan")
 @click.option("--config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config")
@@ -715,9 +718,10 @@ def weekend_scan(ws_config):
     Weekend Swing Signals — Saturday/Sunday scan.
 
     Builds the top-100-most-active + core universe, runs the cheap
-    (daily-bar-only) pivot-proximity filter across all 3 strategies, and
-    prints the resulting watchlist. Output only — nothing is persisted or
-    submitted to trading in this pass.
+    (daily-bar-only) pivot-proximity filter across all 3 strategies, prints
+    the resulting watchlist, and saves it (data/weekend_swing.db) so the
+    dashboard's Weekend Swing tab can show it. Still no order submission —
+    output/persistence only.
     """
     import pandas as pd
 
@@ -725,6 +729,7 @@ def weekend_scan(ws_config):
     from signal_engine.data.news_client import FinnhubNewsClient
     from signal_engine.weekend_swing.data_store import IntradayBarStore
     from signal_engine.weekend_swing.scan import build_weekend_watchlist, next_or_current_monday
+    from signal_engine.weekend_swing.tracker import WeekendSwingTracker
 
     ws_cfg = _load_config(ws_config)
 
@@ -759,6 +764,11 @@ def weekend_scan(ws_config):
             console.print(f"[dim]  ... and {len(result['skipped']) - 20} more (see logs)[/dim]")
 
     candidates = result["candidates"]
+
+    tracker = WeekendSwingTracker()
+    tracker.save_scan_results(result["week_start"].date().isoformat(), candidates)
+    console.print(f"[dim]✓ Saved to data/weekend_swing.db — visible in the dashboard's Weekend Swing tab[/dim]")
+
     if not candidates:
         console.print("\n[yellow]No candidates within the pivot-proximity filter this week.[/yellow]\n")
         return
@@ -802,8 +812,10 @@ def weekend_monitor(ws_config, once, poll_minutes):
 
     Rebuilds the same cheap shortlist as weekend-scan, then pulls intraday
     5/15-min data ONLY for shortlisted tickers and checks each strategy's
-    real trigger condition. Logs triggered signals — no paper-trading
-    submission and no DB write in this pass (both are Part 5/6, deferred).
+    real trigger condition. Triggered signals are logged to the console AND
+    saved (data/weekend_swing.db) so they show up in the dashboard's Monday
+    Trigger Feed — still no automatic paper-trading submission; that happens
+    only when you explicitly submit a signal from the dashboard.
     """
     import time as _time
 
@@ -813,6 +825,7 @@ def weekend_monitor(ws_config, once, poll_minutes):
     from signal_engine.data.news_client import FinnhubNewsClient
     from signal_engine.weekend_swing.data_store import IntradayBarStore
     from signal_engine.weekend_swing.scan import build_weekend_watchlist, next_or_current_monday
+    from signal_engine.weekend_swing.tracker import WeekendSwingTracker
     from signal_engine.weekend_swing.weekend_swing_signals import (
         GapStrengthStrategy,
         OvernightRangeBreakoutStrategy,
@@ -855,6 +868,8 @@ def weekend_monitor(ws_config, once, poll_minutes):
         "overnight_range_breakout": OvernightRangeBreakoutStrategy(ws_cfg),
         "gap_strength": GapStrengthStrategy(ws_cfg),
     }
+    tracker = WeekendSwingTracker()
+    week_start_str = week_start.date().isoformat()
     already_triggered = set()  # (ticker, strategy) pairs — don't re-log the same trigger
 
     def tick():
@@ -912,11 +927,13 @@ def weekend_monitor(ws_config, once, poll_minutes):
             if signal is not None:
                 already_triggered.add(key)
                 fired_any = True
+                signal_id = tracker.log_triggered_signal(signal, week_start_str)
                 color = "green" if signal.direction == "long" else "red"
                 gap_note = f" [{signal.breakdown.get('gap_type')}]" if signal.breakdown.get("gap_type") else ""
                 console.print(
                     f"[{color}]{stamp} TRIGGER {ticker} ({strategy_name}{gap_note}) — "
-                    f"{signal.direction.upper()} @ ${signal.entry_price:.2f} stop ${signal.stop_price:.2f}[/{color}]"
+                    f"{signal.direction.upper()} @ ${signal.entry_price:.2f} stop ${signal.stop_price:.2f} "
+                    f"— saved as {signal_id[:8]}[/{color}]"
                 )
 
         if not fired_any:

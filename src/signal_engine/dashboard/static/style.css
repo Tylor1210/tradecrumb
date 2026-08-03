@@ -458,6 +458,13 @@ body {
 .scan-table tbody tr.row-short { box-shadow: inset 3px 0 0 var(--color-sell); }
 .scan-table tbody tr.row-hold { box-shadow: inset 3px 0 0 var(--color-hold); }
 
+.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+.sortable:hover { color: var(--text-primary); }
+.sortable i { font-size: 9px; opacity: 0.5; margin-left: 3px; }
+
 .pattern-chip {
     display: inline-block;
     background: rgba(139, 92, 246, 0.12);

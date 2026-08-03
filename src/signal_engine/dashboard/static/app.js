@@ -65,6 +65,13 @@ document.addEventListener("DOMContentLoaded", () => {
             loadLEAPSData();
         } else if (tabId === "traders") {
             loadTradersData();
+        } else if (tabId === "weekend") {
+            loadWeekendTabData();
+            startWeekendPolling();
+        }
+
+        if (tabId !== "weekend") {
+            stopWeekendPolling();
         }
     }
 
@@ -876,5 +883,402 @@ document.addEventListener("DOMContentLoaded", () => {
         } catch (err) {
             console.error("Traders tab load failed:", err);
         }
+    }
+
+    // ── Tab 6: Weekend Swing Signals Logic ───────────────────────
+    let weekendScanCache = [];
+    let weekendTriggeredCache = [];
+    let weekendSortState = { field: "distance_pct", asc: true };
+    let weekendSelectedSignalIds = new Set();
+    let weekendPollHandle = null;
+
+    const WEEKEND_STRATEGY_LABELS = {
+        prior_week_breakout: "1: Prior-Week Breakout",
+        overnight_range_breakout: "2: Overnight Range",
+        gap_strength: "3: Gap Strength/Fade",
+    };
+    function weekendStrategyLabel(strategy) {
+        return WEEKEND_STRATEGY_LABELS[strategy] || strategy;
+    }
+    function weekendPill(direction) {
+        const cls = direction === "long" ? "buy" : "short";
+        return `<span class="rec-pill ${cls}" style="padding: 2px 8px;">${direction.toUpperCase()}</span>`;
+    }
+
+    function startWeekendPolling() {
+        stopWeekendPolling();
+        weekendPollHandle = setInterval(() => {
+            loadWeekendTriggered();
+            loadWeekendActive();
+        }, 20000);
+    }
+    function stopWeekendPolling() {
+        if (weekendPollHandle) {
+            clearInterval(weekendPollHandle);
+            weekendPollHandle = null;
+        }
+    }
+
+    async function loadWeekendTabData() {
+        await Promise.all([loadWeekendScan(), loadWeekendTriggered(), loadWeekendActive()]);
+    }
+
+    // -- Scan Results --
+    async function loadWeekendScan() {
+        try {
+            const res = await fetch("/api/weekend-swing/scan");
+            const data = await res.json();
+            weekendScanCache = data.results || [];
+            renderWeekendScanTable();
+        } catch (err) {
+            console.error("Weekend scan load failed:", err);
+        }
+    }
+
+    function renderWeekendScanTable() {
+        const body = document.getElementById("weekend-scan-body");
+        document.getElementById("weekend-scan-count-label").textContent = `${weekendScanCache.length} candidates loaded`;
+
+        if (!weekendScanCache.length) {
+            body.innerHTML = `<tr><td colspan="8" class="text-center py-4">No scan loaded yet &mdash; click "Run Weekend Scan".</td></tr>`;
+            return;
+        }
+
+        const field = weekendSortState.field;
+        const dir = weekendSortState.asc ? 1 : -1;
+        const sorted = [...weekendScanCache].sort((a, b) => {
+            if (field === "ticker") return a.ticker.localeCompare(b.ticker) * dir;
+            return ((a[field] || 0) - (b[field] || 0)) * dir;
+        });
+
+        body.innerHTML = "";
+        sorted.forEach(c => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td><strong>${c.ticker}</strong></td>
+                <td>${weekendStrategyLabel(c.strategy)}</td>
+                <td>$${(c.pivot_high || 0).toFixed(2)}</td>
+                <td>$${(c.pivot_low || 0).toFixed(2)}</td>
+                <td>$${(c.current_price || 0).toFixed(2)}</td>
+                <td>${(c.distance_pct || 0).toFixed(2)}%</td>
+                <td>${c.earnings_excluded ? '<span class="badge" style="background: rgba(239,68,68,0.15); color: var(--color-sell);">EARNINGS</span>' : ''}</td>
+                <td class="text-muted"><small>${c.data_quality || ''}</small></td>
+            `;
+            body.appendChild(tr);
+        });
+    }
+
+    document.querySelectorAll('#weekend-scan-table .sortable').forEach(th => {
+        th.addEventListener("click", () => {
+            const sortField = th.getAttribute("data-sort");
+            if (weekendSortState.field === sortField) {
+                weekendSortState.asc = !weekendSortState.asc;
+            } else {
+                weekendSortState = { field: sortField, asc: true };
+            }
+            renderWeekendScanTable();
+        });
+    });
+
+    const btnWeekendRunScan = document.getElementById("btn-weekend-run-scan");
+    if (btnWeekendRunScan) {
+        btnWeekendRunScan.addEventListener("click", async () => {
+            btnWeekendRunScan.disabled = true;
+            btnWeekendRunScan.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Scanning...`;
+            try {
+                const res = await fetch("/api/weekend-swing/scan/run", { method: "POST" });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+                await loadWeekendScan();
+            } catch (err) {
+                console.error("Weekend scan run failed:", err);
+                alert(`Weekend scan failed: ${err.message}`);
+            } finally {
+                btnWeekendRunScan.disabled = false;
+                btnWeekendRunScan.innerHTML = `<i class="fa-solid fa-play"></i> Run Weekend Scan`;
+            }
+        });
+    }
+
+    // -- Monday Trigger Feed --
+    async function loadWeekendTriggered() {
+        try {
+            const res = await fetch("/api/weekend-swing/triggered");
+            const data = await res.json();
+            weekendTriggeredCache = data.signals || [];
+            const liveIds = new Set(weekendTriggeredCache.map(s => s.signal_id));
+            weekendSelectedSignalIds.forEach(id => { if (!liveIds.has(id)) weekendSelectedSignalIds.delete(id); });
+            renderWeekendTriggeredTable();
+        } catch (err) {
+            console.error("Weekend triggered load failed:", err);
+        }
+    }
+
+    function renderWeekendTriggeredTable() {
+        const body = document.getElementById("weekend-triggered-body");
+        document.getElementById("weekend-triggered-count-label").textContent = `${weekendTriggeredCache.length} triggered`;
+
+        if (!weekendTriggeredCache.length) {
+            body.innerHTML = `<tr><td colspan="7" class="text-center py-4">No signals triggered yet &mdash; click "Check Triggers Now".</td></tr>`;
+        } else {
+            body.innerHTML = "";
+            weekendTriggeredCache.forEach(s => {
+                const gapNote = s.gap_type ? ` <span class="text-muted" style="font-size:10px;">(${s.gap_type.replace(/_/g, "-")})</span>` : "";
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td><input type="checkbox" class="weekend-signal-checkbox" data-signal-id="${s.signal_id}" ${weekendSelectedSignalIds.has(s.signal_id) ? "checked" : ""}></td>
+                    <td><strong>${s.ticker}</strong></td>
+                    <td>${weekendStrategyLabel(s.strategy)}${gapNote}</td>
+                    <td>${weekendPill(s.direction)}</td>
+                    <td>$${(s.trigger_price || 0).toFixed(2)}</td>
+                    <td>$${(s.stop_price || 0).toFixed(2)}</td>
+                    <td class="text-muted"><small>${(s.triggered_at || "").replace("T", " ").slice(0, 16)}</small></td>
+                `;
+                body.appendChild(tr);
+            });
+
+            document.querySelectorAll(".weekend-signal-checkbox").forEach(cb => {
+                cb.addEventListener("change", (e) => {
+                    const id = e.target.getAttribute("data-signal-id");
+                    if (e.target.checked) weekendSelectedSignalIds.add(id);
+                    else weekendSelectedSignalIds.delete(id);
+                    updateWeekendSubmitButton();
+                });
+            });
+        }
+        updateWeekendSubmitButton();
+    }
+
+    function updateWeekendSubmitButton() {
+        const btn = document.getElementById("btn-weekend-submit-selected");
+        if (!btn) return;
+        btn.disabled = weekendSelectedSignalIds.size === 0;
+        btn.innerHTML = weekendSelectedSignalIds.size
+            ? `<i class="fa-solid fa-paper-plane"></i> Submit ${weekendSelectedSignalIds.size} Selected`
+            : `<i class="fa-solid fa-paper-plane"></i> Submit Selected to Paper Trading`;
+    }
+
+    document.getElementById("weekend-select-all")?.addEventListener("change", (e) => {
+        weekendTriggeredCache.forEach(s => {
+            if (e.target.checked) weekendSelectedSignalIds.add(s.signal_id);
+            else weekendSelectedSignalIds.delete(s.signal_id);
+        });
+        renderWeekendTriggeredTable();
+    });
+
+    const btnWeekendCheckTriggers = document.getElementById("btn-weekend-check-triggers");
+    if (btnWeekendCheckTriggers) {
+        btnWeekendCheckTriggers.addEventListener("click", async () => {
+            btnWeekendCheckTriggers.disabled = true;
+            btnWeekendCheckTriggers.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Checking...`;
+            try {
+                const res = await fetch("/api/weekend-swing/triggered/check", { method: "POST" });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+                await loadWeekendTriggered();
+            } catch (err) {
+                console.error("Trigger check failed:", err);
+                alert(`Trigger check failed: ${err.message}`);
+            } finally {
+                btnWeekendCheckTriggers.disabled = false;
+                btnWeekendCheckTriggers.innerHTML = `<i class="fa-solid fa-bolt"></i> Check Triggers Now`;
+            }
+        });
+    }
+
+    // -- Submit-to-paper-trade flow (explicit confirm, no one-click submits) --
+    const weekendSubmitModal = document.getElementById("weekend-submit-modal");
+    document.getElementById("btn-weekend-submit-selected")?.addEventListener("click", () => {
+        if (!weekendSelectedSignalIds.size) return;
+        const body = document.getElementById("weekend-submit-confirm-body");
+        body.innerHTML = "";
+        weekendTriggeredCache.filter(s => weekendSelectedSignalIds.has(s.signal_id)).forEach(s => {
+            const sizeEst = s.direction === "long"
+                ? `~$1,000 notional`
+                : `~${Math.floor(1000 / s.trigger_price)} sh (~$1,000)`;
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td><strong>${s.ticker}</strong></td>
+                <td>${weekendStrategyLabel(s.strategy)}</td>
+                <td>${weekendPill(s.direction)}</td>
+                <td>$${s.trigger_price.toFixed(2)}</td>
+                <td>$${s.stop_price.toFixed(2)}</td>
+                <td>${sizeEst}</td>
+            `;
+            body.appendChild(tr);
+        });
+        weekendSubmitModal.classList.add("active");
+    });
+
+    function closeWeekendSubmitModal() {
+        weekendSubmitModal.classList.remove("active");
+    }
+    document.getElementById("btn-close-weekend-submit-modal")?.addEventListener("click", closeWeekendSubmitModal);
+    document.getElementById("btn-weekend-submit-cancel")?.addEventListener("click", closeWeekendSubmitModal);
+
+    document.getElementById("btn-weekend-submit-confirm")?.addEventListener("click", async () => {
+        const btn = document.getElementById("btn-weekend-submit-confirm");
+        btn.disabled = true;
+        btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Submitting...`;
+        try {
+            const res = await fetch("/api/weekend-swing/submit", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ signal_ids: Array.from(weekendSelectedSignalIds) }),
+            });
+            const data = await res.json();
+            if (data.failed && data.failed.length) {
+                alert(`Some signals failed to submit:\n${data.failed.map(f => `${f.signal_id.slice(0, 8)}: ${f.reason}`).join("\n")}`);
+            }
+            weekendSelectedSignalIds.clear();
+            closeWeekendSubmitModal();
+            await Promise.all([loadWeekendTriggered(), loadWeekendActive()]);
+        } catch (err) {
+            console.error("Submit failed:", err);
+            alert("Submission failed — check console / server logs.");
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = `<i class="fa-solid fa-check"></i> Confirm & Submit`;
+        }
+    });
+
+    // -- Active Positions --
+    async function loadWeekendActive() {
+        try {
+            const res = await fetch("/api/weekend-swing/active");
+            const data = await res.json();
+            const positions = data.positions || [];
+            const body = document.getElementById("weekend-active-body");
+            document.getElementById("weekend-active-count-label").textContent = `${positions.length} open`;
+
+            if (!positions.length) {
+                body.innerHTML = `<tr><td colspan="8" class="text-center py-4">No active positions.</td></tr>`;
+                return;
+            }
+            body.innerHTML = "";
+            positions.forEach(p => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td><strong>${p.ticker}</strong></td>
+                    <td>${weekendStrategyLabel(p.strategy)}</td>
+                    <td>${weekendPill(p.direction)}</td>
+                    <td>$${(p.entry_price || 0).toFixed(2)}</td>
+                    <td>${(p.qty || 0).toFixed(4).replace(/\.?0+$/, "")}</td>
+                    <td>$${(p.notional || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                    <td class="text-muted"><small>${(p.submitted_at || "").replace("T", " ").slice(0, 16)}</small></td>
+                    <td><button class="action-link danger" data-signal-id="${p.signal_id}">Close</button></td>
+                `;
+                body.appendChild(tr);
+            });
+
+            document.querySelectorAll("#weekend-active-body .action-link").forEach(btn => {
+                btn.addEventListener("click", async (e) => {
+                    const signalId = e.target.getAttribute("data-signal-id");
+                    if (!confirm("Close this position at the current market price?")) return;
+                    try {
+                        const res = await fetch(`/api/weekend-swing/close/${signalId}`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ exit_reason: "manual" }),
+                        });
+                        if (!res.ok) {
+                            const err = await res.json().catch(() => ({}));
+                            throw new Error(err.detail || `HTTP ${res.status}`);
+                        }
+                        await loadWeekendActive();
+                    } catch (err) {
+                        console.error("Close failed:", err);
+                        alert(`Close failed: ${err.message}`);
+                    }
+                });
+            });
+        } catch (err) {
+            console.error("Weekend active load failed:", err);
+        }
+    }
+
+    // -- History modal --
+    const weekendHistoryModal = document.getElementById("weekend-history-modal");
+    document.getElementById("btn-weekend-history")?.addEventListener("click", () => {
+        loadWeekendHistory();
+        weekendHistoryModal.classList.add("active");
+    });
+    document.getElementById("btn-close-weekend-history-modal")?.addEventListener("click", () => {
+        weekendHistoryModal.classList.remove("active");
+    });
+    document.getElementById("btn-weekend-history-apply-filters")?.addEventListener("click", () => loadWeekendHistory());
+
+    async function loadWeekendHistory() {
+        const strategy = document.getElementById("weekend-history-strategy-filter").value;
+        const dateFrom = document.getElementById("weekend-history-date-from").value;
+        const dateTo = document.getElementById("weekend-history-date-to").value;
+
+        const params = new URLSearchParams();
+        if (strategy) params.set("strategy", strategy);
+        if (dateFrom) params.set("date_from", dateFrom);
+        if (dateTo) params.set("date_to", dateTo);
+
+        try {
+            const res = await fetch(`/api/weekend-swing/history?${params.toString()}`);
+            const data = await res.json();
+            renderWeekendHistorySummary(data.summary);
+            renderWeekendHistoryTable(data.trades || []);
+        } catch (err) {
+            console.error("Weekend history load failed:", err);
+        }
+    }
+
+    function renderWeekendHistorySummary(summary) {
+        const container = document.getElementById("weekend-history-summary");
+        const c = summary.combined;
+        const wr = c.win_rate_pct;
+        const wrColor = wr === null ? "" : (wr >= 50 ? "var(--color-buy)" : "var(--color-sell)");
+        container.innerHTML = `
+            <div class="glass-card metric-card">
+                <div class="metric-icon"><i class="fa-solid fa-list"></i></div>
+                <div class="metric-data"><span class="metric-title">Total Trades</span><h2>${c.total_trades}</h2></div>
+            </div>
+            <div class="glass-card metric-card">
+                <div class="metric-icon" style="color:${wrColor};"><i class="fa-solid fa-trophy"></i></div>
+                <div class="metric-data"><span class="metric-title">Win Rate</span><h2 style="color:${wrColor};">${wr === null ? "--" : wr.toFixed(1) + "%"}</h2></div>
+            </div>
+            <div class="glass-card metric-card">
+                <div class="metric-icon positive"><i class="fa-solid fa-arrow-trend-up"></i></div>
+                <div class="metric-data"><span class="metric-title">Avg Win</span><h2 class="green-text">${c.avg_win_pct === null ? "--" : "+" + c.avg_win_pct.toFixed(2) + "%"}</h2></div>
+            </div>
+            <div class="glass-card metric-card">
+                <div class="metric-icon negative"><i class="fa-solid fa-arrow-trend-down"></i></div>
+                <div class="metric-data"><span class="metric-title">Avg Loss</span><h2 class="red-text">${c.avg_loss_pct === null ? "--" : c.avg_loss_pct.toFixed(2) + "%"}</h2></div>
+            </div>
+        `;
+    }
+
+    function renderWeekendHistoryTable(trades) {
+        const body = document.getElementById("weekend-history-body");
+        if (!trades.length) {
+            body.innerHTML = `<tr><td colspan="8" class="text-center py-4">No closed trades match these filters.</td></tr>`;
+            return;
+        }
+        body.innerHTML = "";
+        trades.forEach(t => {
+            const pl = t.outcome_pct || 0;
+            const plClass = pl > 0 ? "green-text" : "red-text";
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td class="text-muted"><small>${(t.triggered_at || "").slice(0, 10)}</small></td>
+                <td><strong>${t.ticker}</strong></td>
+                <td>${weekendStrategyLabel(t.strategy)}</td>
+                <td>${weekendPill(t.direction)}</td>
+                <td>$${(t.entry_price || 0).toFixed(2)}</td>
+                <td>$${(t.exit_price || 0).toFixed(2)}</td>
+                <td class="text-muted"><small>${t.exit_reason || ""}</small></td>
+                <td class="${plClass}">${pl >= 0 ? "+" : ""}${pl.toFixed(2)}%</td>
+            `;
+            body.appendChild(tr);
+        });
     }
 });

@@ -39,6 +39,7 @@ from signal_engine.backtest.metrics import compute_directional_accuracy
 from signal_engine.paper_trading.tracker import TradeTracker
 from signal_engine.leaps.candidate_screener import LEAPSScreener
 from signal_engine.trader_tracking.tracker import TraderCallTracker
+from signal_engine.weekend_swing.tracker import WeekendSwingTracker
 
 logger = logging.getLogger("signal_engine.dashboard")
 logging.basicConfig(level=logging.INFO)
@@ -76,6 +77,13 @@ def get_backtest_config() -> dict:
     if not bt_path.exists():
         return {}
     with open(bt_path) as f:
+        return yaml.safe_load(f) or {}
+
+def get_weekend_swing_config() -> dict:
+    ws_path = Path("config/weekend_swing.yaml")
+    if not ws_path.exists():
+        return {}
+    with open(ws_path) as f:
         return yaml.safe_load(f) or {}
 
 def has_credentials() -> bool:
@@ -692,6 +700,282 @@ def api_traders_delete_call(call_id: str):
     deleted = tracker.delete_call(call_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Call not found")
+    return {"deleted": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# WEEKEND SWING SIGNALS
+# ─────────────────────────────────────────────────────────────
+# Weekly strategy lane, independent of the daily scan above. Scan results
+# and triggered signals are populated by `signal-engine weekend-scan` /
+# `weekend-monitor` (or the run-now endpoints below, which do the same
+# work synchronously). Submission is the only place this touches real
+# paper orders — every other endpoint here is read/log only.
+
+@app.get("/api/weekend-swing/scan")
+def api_weekend_scan_get(week_start: Optional[str] = Query(None)):
+    """Latest (or a specific week's) persisted weekend scan results."""
+    tracker = WeekendSwingTracker()
+    return {"results": tracker.get_scan_results(week_start)}
+
+
+@app.post("/api/weekend-swing/scan/run")
+def api_weekend_scan_run():
+    """
+    Runs a fresh weekend scan now (universe + cheap pivot-proximity filter
+    across all 3 strategies) and persists it. Can take a while on the first
+    call for a given ticker (building the universe + fetching daily bars);
+    cheap on repeats since daily bars are cached.
+    """
+    import pandas as pd
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+    from signal_engine.weekend_swing.scan import build_weekend_watchlist, next_or_current_monday
+
+    if not has_credentials():
+        raise HTTPException(status_code=400, detail="Alpaca API keys required for Weekend Swing Signals")
+
+    try:
+        alpaca = AlpacaDataClient()
+        finnhub = FinnhubNewsClient() if os.getenv("FINNHUB_API_KEY") else None
+        ws_cfg = get_weekend_swing_config()
+        bar_store = IntradayBarStore(alpaca)
+        week_start = next_or_current_monday(pd.Timestamp.now(tz="UTC"))
+
+        result = build_weekend_watchlist(ws_cfg, alpaca, finnhub, bar_store, week_start)
+
+        tracker = WeekendSwingTracker()
+        tracker.save_scan_results(result["week_start"].date().isoformat(), result["candidates"])
+
+        return {
+            "week_start": result["week_start"].date().isoformat(),
+            "universe_size": result["universe_size"],
+            "skipped_count": len(result["skipped"]),
+            "results": tracker.get_scan_results(result["week_start"].date().isoformat()),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Weekend scan run failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weekend-swing/triggered")
+def api_weekend_triggered():
+    """Signals that have fired but not been submitted to paper trading."""
+    tracker = WeekendSwingTracker()
+    return {"signals": tracker.get_signals(status="TRIGGERED")}
+
+
+@app.post("/api/weekend-swing/triggered/check")
+def api_weekend_check_triggers():
+    """
+    Runs the Monday-trigger check now against the latest persisted scan
+    shortlist (same logic as `weekend-monitor --once`), logs any new
+    triggers, and returns them. No order submission happens here.
+    """
+    import pandas as pd
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+    from signal_engine.weekend_swing.earnings import get_earnings_exclusions
+    from signal_engine.weekend_swing.scan import next_or_current_monday
+    from signal_engine.weekend_swing.weekend_swing_signals import (
+        GapStrengthStrategy,
+        OvernightRangeBreakoutStrategy,
+        PriorWeekBreakoutStrategy,
+    )
+
+    if not has_credentials():
+        raise HTTPException(status_code=400, detail="Alpaca API keys required for Weekend Swing Signals")
+
+    ws_cfg = get_weekend_swing_config()
+    alpaca = AlpacaDataClient()
+    finnhub = FinnhubNewsClient() if os.getenv("FINNHUB_API_KEY") else None
+    bar_store = IntradayBarStore(alpaca)
+    tracker = WeekendSwingTracker()
+
+    week_start = next_or_current_monday(pd.Timestamp.now(tz="UTC"))
+    week_start_str = week_start.date().isoformat()
+    week_end = week_start + pd.Timedelta(days=4)
+    earnings_excluded = get_earnings_exclusions(finnhub, week_start, week_end)
+
+    candidates = tracker.get_scan_results(week_start_str)
+    already_open = {(s["ticker"], s["strategy"]) for s in tracker.get_signals()}
+
+    strategies = {
+        "prior_week_breakout": PriorWeekBreakoutStrategy(ws_cfg),
+        "overnight_range_breakout": OvernightRangeBreakoutStrategy(ws_cfg),
+        "gap_strength": GapStrengthStrategy(ws_cfg),
+    }
+    now = pd.Timestamp.now(tz="UTC")
+    newly_triggered = []
+
+    for c in candidates:
+        key = (c["ticker"], c["strategy"])
+        if key in already_open:
+            continue
+        ticker, strategy_name = c["ticker"], c["strategy"]
+        strategy = strategies[strategy_name]
+
+        try:
+            if strategy_name == "prior_week_breakout":
+                daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=90), week_start)
+                hist_15 = bar_store.get_bars(ticker, "15Min", week_start - pd.Timedelta(days=40), week_start)
+                levels = strategy.scan(ticker, daily_df, week_start, hist_15, earnings_excluded)
+                if levels is None:
+                    continue
+                monday_bars = bar_store.get_bars(ticker, "15Min", week_start, now)
+                monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                signal = strategy.check_trigger(levels, monday_bars)
+
+            elif strategy_name == "overnight_range_breakout":
+                daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=60), week_start)
+                levels = strategy.scan(ticker, daily_df, week_start)
+                if levels is None:
+                    continue
+                monday_bars = bar_store.get_bars(ticker, "5Min", week_start, now)
+                monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                if monday_bars.empty:
+                    continue
+                signal = strategy.check_trigger(levels, monday_bars, monday_bars.index.min())
+
+            else:  # gap_strength
+                daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=60), week_start)
+                levels = strategy.scan(ticker, daily_df, week_start)
+                if levels is None:
+                    continue
+                monday_daily = daily_df.loc[daily_df.index >= week_start]
+                if monday_daily.empty:
+                    continue
+                monday_open = float(monday_daily.iloc[0]["open"])
+                monday_bars = bar_store.get_bars(ticker, "5Min", week_start, now)
+                monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                if monday_bars.empty:
+                    continue
+                signal = strategy.check_trigger(levels, monday_open, monday_bars.iloc[0])
+
+        except Exception as e:
+            logger.warning("Trigger check failed for %s/%s: %s", ticker, strategy_name, e)
+            continue
+
+        if signal is not None:
+            tracker.log_triggered_signal(signal, week_start_str)
+            newly_triggered.append(signal.ticker)
+
+    return {"checked": len(candidates), "newly_triggered": newly_triggered, "signals": tracker.get_signals(status="TRIGGERED")}
+
+
+@app.get("/api/weekend-swing/active")
+def api_weekend_active():
+    """Submitted, currently-open weekend-swing paper positions."""
+    tracker = WeekendSwingTracker()
+    return {"positions": tracker.get_signals(status="SUBMITTED")}
+
+
+class WeekendSwingSubmit(BaseModel):
+    signal_ids: list[str]
+
+
+@app.post("/api/weekend-swing/submit")
+def api_weekend_submit(body: WeekendSwingSubmit):
+    """
+    Submits the given TRIGGERED signals to Alpaca paper trading (reuses the
+    existing PaperTradingBroker — same paper-only connector as the rest of
+    the app). Explicit, batch, no auto-execution: only signal_ids passed
+    here get submitted.
+    """
+    from signal_engine.paper_trading.broker import PaperTradingBroker
+
+    tracker = WeekendSwingTracker()
+    ws_cfg = get_weekend_swing_config()
+    trade_size = ws_cfg.get("execution", {}).get("fixed_trade_size", 1000.0)
+
+    try:
+        broker = PaperTradingBroker()
+    except EnvironmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    submitted, failed = [], []
+    for signal_id in body.signal_ids:
+        signal = tracker.get_signal(signal_id)
+        if signal is None or signal["status"] != "TRIGGERED":
+            failed.append({"signal_id": signal_id, "reason": "not found or already acted on"})
+            continue
+
+        try:
+            if signal["direction"] == "long":
+                order = broker.submit_market_buy(signal["ticker"], notional=trade_size)
+                entry_price = order.get("filled_avg_price") or signal["trigger_price"]
+                qty = order.get("qty") or (trade_size / entry_price if entry_price else 0)
+            else:
+                price = signal["trigger_price"]
+                qty = int(trade_size // price) if price else 0
+                if qty < 1:
+                    failed.append({"signal_id": signal_id, "reason": f"${trade_size:.0f} too small for 1 share at ${price:.2f}"})
+                    continue
+                order = broker.submit_market_short(signal["ticker"], qty=qty)
+                entry_price = order.get("filled_avg_price") or price
+                qty = order.get("qty") or qty
+
+            tracker.submit_signal(
+                signal_id, qty=float(qty or 0), notional=round(float(qty or 0) * float(entry_price or 0), 2),
+                broker_trade_id=order.get("id", ""), entry_price=float(entry_price or 0),
+            )
+            submitted.append(signal_id)
+        except Exception as e:
+            logger.error("Weekend swing submit failed for %s: %s", signal_id, e)
+            failed.append({"signal_id": signal_id, "reason": str(e)})
+
+    return {"submitted": submitted, "failed": failed}
+
+
+class WeekendSwingClose(BaseModel):
+    exit_reason: str = "manual"
+
+
+@app.post("/api/weekend-swing/close/{signal_id}")
+def api_weekend_close(signal_id: str, body: WeekendSwingClose):
+    """Closes an active (SUBMITTED) position via the real paper broker, then records the outcome."""
+    from signal_engine.paper_trading.broker import PaperTradingBroker
+
+    tracker = WeekendSwingTracker()
+    signal = tracker.get_signal(signal_id)
+    if signal is None or signal["status"] != "SUBMITTED":
+        raise HTTPException(status_code=404, detail="No active position with that signal_id")
+
+    try:
+        broker = PaperTradingBroker()
+        order = broker.close_position(signal["ticker"])
+        exit_price = order.get("filled_avg_price") or signal["entry_price"]
+    except EnvironmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Weekend swing close failed for %s: %s", signal_id, e)
+        if "position not found" in str(e).lower():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{signal['ticker']}'s entry order hasn't filled yet (submitted outside "
+                    "market hours, or still queued) — there's no open position to close. "
+                    "Try again once the market is open and the order fills."
+                ),
+            )
+        raise HTTPException(status_code=500, detail=str(e))
+
+    outcome = tracker.close_signal(signal_id, exit_price=float(exit_price), exit_reason=body.exit_reason)
+    return {"signal_id": signal_id, "exit_price": exit_price, "outcome_pct": outcome}
+
+
+@app.get("/api/weekend-swing/history")
+def api_weekend_history(
+    strategy: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+):
+    """Closed weekend-swing trades + summary stats, combined and by strategy."""
+    tracker = WeekendSwingTracker()
+    return {
+        "trades": tracker.get_history(strategy=strategy, date_from=date_from, date_to=date_to),
+        "summary": tracker.get_summary_stats(strategy=strategy, date_from=date_from, date_to=date_to),
+    }
     return {"deleted": True}
 
 
