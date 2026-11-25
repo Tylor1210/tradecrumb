@@ -776,6 +776,7 @@ def api_weekend_check_triggers():
     import pandas as pd
     from signal_engine.weekend_swing.data_store import IntradayBarStore
     from signal_engine.weekend_swing.earnings import get_earnings_exclusions
+    from signal_engine.weekend_swing.levels import monday_session_bars, session_open_time
     from signal_engine.weekend_swing.scan import next_or_current_monday
     from signal_engine.weekend_swing.weekend_swing_signals import (
         GapStrengthStrategy,
@@ -823,7 +824,7 @@ def api_weekend_check_triggers():
                 if levels is None:
                     continue
                 monday_bars = bar_store.get_bars(ticker, "15Min", week_start, now)
-                monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                monday_bars = monday_session_bars(monday_bars, week_start)
                 signal = strategy.check_trigger(levels, monday_bars)
 
             elif strategy_name == "overnight_range_breakout":
@@ -832,10 +833,10 @@ def api_weekend_check_triggers():
                 if levels is None:
                     continue
                 monday_bars = bar_store.get_bars(ticker, "5Min", week_start, now)
-                monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                monday_bars = monday_session_bars(monday_bars, week_start)
                 if monday_bars.empty:
                     continue
-                signal = strategy.check_trigger(levels, monday_bars, monday_bars.index.min())
+                signal = strategy.check_trigger(levels, monday_bars, session_open_time(week_start, monday_bars.index))
 
             else:  # gap_strength
                 daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=60), week_start)
@@ -847,7 +848,7 @@ def api_weekend_check_triggers():
                     continue
                 monday_open = float(monday_daily.iloc[0]["open"])
                 monday_bars = bar_store.get_bars(ticker, "5Min", week_start, now)
-                monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                monday_bars = monday_session_bars(monday_bars, week_start)
                 if monday_bars.empty:
                     continue
                 signal = strategy.check_trigger(levels, monday_open, monday_bars.iloc[0])

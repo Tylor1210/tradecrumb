@@ -11,6 +11,54 @@ from typing import Optional
 
 import pandas as pd
 
+ET = "America/New_York"
+SESSION_OPEN = pd.Timedelta(hours=9, minutes=30)
+SESSION_CLOSE = pd.Timedelta(hours=16)
+
+
+# ── Time alignment ────────────────────────────────────────────
+# Alpaca bars are UTC-indexed. A daily bar is stamped at midnight New York time
+# (05:00 UTC in winter, 04:00 UTC in summer), and 5/15-min bars include IEX
+# pre-market and after-hours prints. week_start is a calendar Monday (UTC
+# midnight from the CLI). So bars are compared by their New York calendar date
+# and wall-clock time, never by raw UTC timestamp. Naive indexes (test
+# fixtures) are taken as already being New York wall-clock time.
+
+def _ny_wall_clock(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    index = pd.DatetimeIndex(index)
+    return index.tz_convert(ET).tz_localize(None) if index.tz is not None else index
+
+
+def bar_dates(df: pd.DataFrame) -> pd.DatetimeIndex:
+    """New York calendar date of each bar (naive, midnight)."""
+    return _ny_wall_clock(df.index).normalize()
+
+
+def calendar_day(ts: pd.Timestamp) -> pd.Timestamp:
+    """The calendar date `ts` names (week_start is 'Monday', whatever tz it carries)."""
+    return pd.Timestamp(pd.Timestamp(ts).date())
+
+
+def session_open_time(day: pd.Timestamp, like_index: pd.DatetimeIndex) -> pd.Timestamp:
+    """09:30 New York on `day`, expressed in the same tz as `like_index`."""
+    naive = calendar_day(day) + SESSION_OPEN
+    tz = pd.DatetimeIndex(like_index).tz
+    return naive.tz_localize(ET).tz_convert(tz) if tz is not None else naive
+
+
+def monday_session_bars(intraday_df: pd.DataFrame, day: pd.Timestamp) -> pd.DataFrame:
+    """Intraday bars from `day`'s regular session only (09:30 to 16:00 New York)."""
+    if intraday_df is None or intraday_df.empty:
+        return intraday_df
+    wall = _ny_wall_clock(intraday_df.index)
+    since_midnight = wall - wall.normalize()
+    mask = (
+        (wall.normalize() == calendar_day(day))
+        & (since_midnight >= SESSION_OPEN)
+        & (since_midnight < SESSION_CLOSE)
+    )
+    return intraday_df.loc[mask]
+
 
 def is_data_sane(daily_df: pd.DataFrame, max_single_day_move_pct: float = 50.0) -> bool:
     """
@@ -35,9 +83,9 @@ def prior_week_range(daily_df: pd.DataFrame, week_start: pd.Timestamp) -> Option
     before `week_start`. Returns (high, low), or None if no bars fall in
     that window.
     """
-    prior_week_end = week_start - pd.Timedelta(days=1)
-    prior_week_start = prior_week_end - pd.Timedelta(days=6)
-    week_df = daily_df.loc[(daily_df.index >= prior_week_start) & (daily_df.index <= prior_week_end)]
+    monday = calendar_day(week_start)
+    dates = bar_dates(daily_df)
+    week_df = daily_df.loc[(dates >= monday - pd.Timedelta(days=7)) & (dates < monday)]
     if week_df.empty:
         return None
     return float(week_df["high"].max()), float(week_df["low"].min())
@@ -101,9 +149,12 @@ def overnight_range_proxy(daily_df: pd.DataFrame, week_start: pd.Timestamp) -> O
     is tagged with data_quality="regular_session_proxy_no_extended_hours" so
     downstream signals can flag it (see config/weekend_swing.yaml).
     """
-    prior_friday = week_start - pd.Timedelta(days=3)
-    friday_rows = daily_df.loc[daily_df.index <= prior_friday]
-    monday_rows = daily_df.loc[daily_df.index >= week_start]
+    monday = calendar_day(week_start)
+    dates = bar_dates(daily_df)
+    # WHY dates, not timestamps: Alpaca stamps Friday's bar at Fri 05:00 UTC, which is
+    # after "Friday 00:00", so a timestamp cut-off silently picked Thursday's close.
+    friday_rows = daily_df.loc[dates < monday]
+    monday_rows = daily_df.loc[dates >= monday]
     if friday_rows.empty or monday_rows.empty:
         return None
 
