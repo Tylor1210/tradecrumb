@@ -125,6 +125,17 @@ uv run signal-engine leaps
 
 Screens watchlist for long-horizon options candidates using relative strength vs SPY, earnings trends, and macro theme alignment. Options chain data is stubbed — see `src/signal_engine/leaps/options_stub.py` and `src/signal_engine/leaps/README_LEAPS.md` to connect a data source.
 
+### LEAPS Dip Backtest (beaten-down quality stocks)
+
+```bash
+uv run signal-engine leaps-dip-backtest
+uv run signal-engine leaps-dip-backtest --compare-revenue-filter --trades-csv data/leaps_dip_trades.csv
+uv run signal-engine leaps-dip-backtest --compare-variants      # fixes side by side, early vs late period
+uv run signal-engine leaps-dip-backtest --wide                  # every column, for a wide terminal
+```
+
+Tests a different LEAPS idea from a trading video, on the shares themselves. Buy when a big company closes 50% or more below its high, its last annual revenue grew (Finnhub SEC filings, only those filed before the signal), daily RSI is under 30 and a bullish pin bar prints. Enter at the next open, add once on bullish RSI divergence, hold 6, 12 or 24 months or until the profit take, at most 5 positions. Results show win rate, average and worst trade, account CAGR and max drawdown next to SPY buy and hold and the 25% a year target. A second table runs the same trades as at the money calls priced with Black-Scholes from realized volatility. That table is a rough estimate, not an options backtest. `--compare-variants` runs the shares version next to five simple fixes for its big losers and idle money (a 25% stop, waiting for a close back above the 50-day average, only buying while SPY is above its 200-day, a 3 month time stop on losers, and all four together with smaller 8% positions), each replayed separately on 2017 to 2021 and 2022 on. Output fits an 80 column terminal. Settings and the universe (including names that later failed or were bought out) live in `config/leaps_dip.yaml`.
+
 ---
 
 ## Running Tests
@@ -211,6 +222,13 @@ signal-engine/
 │   │   ├── candidate_screener.py  # long-horizon signal logic
 │   │   ├── options_stub.py        # stubbed options chain client
 │   │   └── README_LEAPS.md        # data source docs + activation guide
+│   │
+│   ├── leaps_dip/
+│   │   ├── rules.py               # drawdown, RSI, pin bar, divergence add
+│   │   ├── fundamentals.py        # point-in-time revenue growth (Finnhub filings)
+│   │   ├── data.py                # universe + daily bars (incl. delisted names)
+│   │   ├── simulate.py            # trades, call estimate, one-account replay
+│   │   └── variants.py            # stop / reclaim / trend / time stop / sizing fixes
 │   │
 │   └── cli.py                  # CLI entry points
 │

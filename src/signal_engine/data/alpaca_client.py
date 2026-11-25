@@ -55,6 +55,8 @@ class AlpacaDataClient:
         start: datetime,
         end: datetime,
         timeframe_str: str = "1Day",
+        feed: str = "iex",
+        asof: Optional[str] = None,
     ) -> dict[str, pd.DataFrame]:
         """
         Fetch OHLCV bars for a list of symbols.
@@ -64,6 +66,11 @@ class AlpacaDataClient:
             start:         Start datetime (UTC)
             end:           End datetime (UTC)
             timeframe_str: "1Day", "1Hour", "15Min", "5Min", "1Min"
+            feed:          "iex" (default, free real-time feed) or "sip" (all
+                           exchanges; free accounts can pull SIP history
+                           older than 15 minutes, back to 2016)
+            asof:          "YYYY-MM-DD" to look a symbol up as it was named on
+                           that date (needed for delisted or reused tickers)
 
         Returns:
             Dict mapping ticker → DataFrame with columns:
@@ -102,7 +109,8 @@ class AlpacaDataClient:
             start=start,
             end=end,
             adjustment="all",  # split + dividend adjusted
-            feed="iex",        # use IEX feed on free tier
+            feed=feed,         # IEX by default on the free tier
+            asof=asof,
         )
 
         try:

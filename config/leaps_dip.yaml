@@ -1,0 +1,106 @@
+# Beaten-down quality stock dip strategy (LEAPS idea from a trading video)
+# Backtested on the stocks themselves:  uv run signal-engine leaps-dip-backtest
+# Paper research only. Nothing here places orders.
+
+backtest:
+  start: "2016-01-01"        # Alpaca SIP daily history starts in 2016
+  holds_months: [6, 12, 24]
+  max_positions: 5           # the video spreads across 3 to 5 at once
+  initial_capital: 10000
+  revenue_filter: true       # needs FINNHUB_API_KEY; skipped with a note if missing
+  target_cagr_pct: 25        # Ty's yearly target
+
+rules:
+  drawdown_min: 0.50         # close at least 50% below the highest high so far
+  high_lookback_bars: null   # null = all history loaded (since 2016, not a true all-time high)
+  min_history_bars: 252
+  rsi_period: 14
+  rsi_max: 30
+  rsi_lookback: 3            # RSI under 30 on the pin bar or the 2 bars before
+  pin_wick_to_body: 2.0
+  pin_wick_to_range: 0.5
+  pin_body_top: 0.6
+  divergence_rsi_max: 45
+  divergence_min_bars: 5
+  max_adds: 1
+
+trade:
+  entry_fraction: 0.6667     # buy 2/3 of the slot on entry, keep 1/3 for the divergence add
+  stock_profit_take: 0.50    # sell the shares at +50%
+  call_profit_take: 1.00     # the video takes 70 to 100%+ on the option itself
+  stop_loss: null            # the video uses none (a LEAP's premium is the max loss)
+  fees_pct: 0.1
+
+# Fixes tested side by side with --compare-variants (shares only).
+# Round numbers picked up front, not tuned on the results.
+variants:
+  hold_months: 12
+  split_date: "2022-01-01"   # early and late periods are each replayed fresh
+  stop_loss: 0.25            # sell a trade 25% below what was paid
+  time_stop_months: 3        # at 3 months, sell a trade still under water
+  trend_sma_bars: 200        # only start trades while SPY is above this average
+  risk_pct: 0.02             # "small" sizing, 2% of the account at risk at the stop
+  small_max_positions: 10
+
+# Rough Black-Scholes estimate for the call version. Not real option quotes.
+option:
+  min_years: 1.0
+  extra_years: 0.25
+  strike_pct: 1.0            # at the money
+  vol_window: 60
+  vol_floor: 0.25
+  vol_multiplier: 1.0
+  risk_free: 0.045
+  cost_pct: 3.0              # spread lost on each side
+
+universe:
+  # Large caps under today's symbols. Mostly S&P 500 members in 2016.
+  tickers: [
+    AAPL, MSFT, GOOGL, AMZN, META, NFLX, NVDA, INTC, CSCO, ORCL, IBM, QCOM, TXN,
+    ADBE, CRM, AVGO, MU, AMD, WDC, STX, HPQ, HPE, EBAY, PYPL, AKAM, NTAP, ADSK,
+    INTU, CTSH, ACN, ADP, EA,
+    T, VZ, CMCSA, DIS, WBD, LUMN,
+    WMT, TGT, COST, HD, LOW, MCD, SBUX, NKE, KO, PEP, PG, CL, KMB, MO, PM, KHC,
+    GIS, CPB, HSY, MDLZ, KR, CVS, M, KSS, TJX, ROST, BBY, F, GM, MGM, WYNN, CCL,
+    RCL, NCLH, MAR, EXPE, BKNG, VFC, TPR, RL,
+    JNJ, PFE, MRK, ABBV, BMY, LLY, AMGN, GILD, BIIB, REGN, VRTX, UNH, CI, HUM,
+    ELV, MDT, ABT, TMO, DHR, BAX, BDX, SYK, ISRG, ZBH, MCK, CAH, COR, VTRS, PRGO,
+    JPM, BAC, C, WFC, GS, MS, USB, PNC, COF, AXP, BK, STT, SCHW, MET, PRU, AIG,
+    ALL, TRV, BLK, KEY, CFG, RF, HBAN, ZION, CMA,
+    XOM, CVX, COP, OXY, SLB, HAL, BKR, EOG, DVN, APA, MPC, VLO, PSX, KMI, WMB,
+    OKE, NOV,
+    GE, BA, CAT, DE, MMM, HON, RTX, LMT, GD, NOC, UPS, FDX, UNP, CSX, NSC, EMR,
+    ITW, ETN, DAL, UAL, AAL, LUV, WM,
+    FCX, NEM, NUE, MOS, CF, IP,
+    NEE, DUK, SO, D, EXC, AEP,
+    SPG, AMT, PLD, EQR, VNO, MAC, KIM,
+  ]
+  # Names that failed, were bought out or renamed during the test. asof is a
+  # date the old symbol still traded, so Alpaca finds the right company.
+  delisted:
+    - {symbol: SIVB, asof: "2023-03-08", note: "SVB Financial, failed 2023"}
+    - {symbol: FRC, asof: "2023-04-28", note: "First Republic, failed 2023"}
+    - {symbol: SBNY, asof: "2023-03-10", note: "Signature Bank, failed 2023"}
+    - {symbol: CHK, asof: "2020-06-26", note: "Chesapeake, bankrupt 2020"}
+    - {symbol: FTR, asof: "2020-04-01", note: "Frontier Communications, bankrupt 2020"}
+    - {symbol: MNK, asof: "2020-09-30", note: "Mallinckrodt, bankrupt 2020"}
+    - {symbol: ENDP, asof: "2022-06-30", note: "Endo, bankrupt 2022"}
+    - {symbol: BBBY, asof: "2023-01-31", note: "Bed Bath and Beyond, bankrupt 2023"}
+    - {symbol: WBA, asof: "2025-08-01", note: "Walgreens, taken private 2025"}
+    - {symbol: PARA, asof: "2025-08-01", note: "Paramount, merged 2025"}
+    - {symbol: DISH, asof: "2023-12-29", note: "DISH, merged into EchoStar 2023"}
+    - {symbol: JWN, asof: "2025-05-01", note: "Nordstrom, taken private 2025"}
+    - {symbol: JNPR, asof: "2025-06-30", note: "Juniper, bought by HPE 2025"}
+    - {symbol: X, asof: "2025-06-01", note: "US Steel, bought by Nippon Steel 2025"}
+    - {symbol: MRO, asof: "2024-11-20", note: "Marathon Oil, bought by ConocoPhillips 2024"}
+    - {symbol: PXD, asof: "2024-05-01", note: "Pioneer, bought by Exxon 2024"}
+    - {symbol: HES, asof: "2025-07-15", note: "Hess, bought by Chevron 2025"}
+    - {symbol: CELG, asof: "2019-11-01", note: "Celgene, bought by BMS 2019"}
+    - {symbol: AGN, asof: "2020-04-30", note: "Allergan, bought by AbbVie 2020"}
+    - {symbol: TWTR, asof: "2022-10-27", note: "Twitter, taken private 2022"}
+    - {symbol: ATVI, asof: "2023-10-12", note: "Activision, bought by Microsoft 2023"}
+    - {symbol: XLNX, asof: "2022-02-11", note: "Xilinx, bought by AMD 2022"}
+    - {symbol: CTXS, asof: "2022-09-29", note: "Citrix, taken private 2022"}
+    - {symbol: TWX, asof: "2018-06-13", note: "Time Warner, bought by AT&T 2018"}
+    - {symbol: MON, asof: "2018-06-06", note: "Monsanto, bought by Bayer 2018"}
+    - {symbol: LNKD, asof: "2016-12-07", note: "LinkedIn, bought by Microsoft 2016"}
