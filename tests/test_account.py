@@ -160,3 +160,14 @@ def test_multi_ticker_return_and_drawdown_not_zero(loss_cap):
     assert m.account.weekly.periods > 0
     assert m.account.monthly.periods >= 3
     assert m.account.trades_taken == m.total_trades  # two tickers never fill 10 slots
+
+
+def test_flat_periods_count_as_neither_up_nor_down():
+    idx = pd.bdate_range("2024-01-01", "2024-01-19")
+    eq = pd.Series(100_000.0, index=idx)
+    eq.loc["2024-01-12":] = 101_000.0  # week 2 up, weeks 1 and 3 flat
+    res = simulate_account(_trades([]), pd.DataFrame({"A": 1.0}, index=idx), 100_000, NO_FEES)
+    res.equity = eq
+    w = account_stats(res).weekly
+    assert w.positive_pct == pytest.approx(33.3, abs=0.1)
+    assert w.negative_pct == 0.0

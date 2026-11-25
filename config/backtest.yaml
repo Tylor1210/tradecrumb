@@ -42,6 +42,17 @@ loss_cap:
   replaces_fixed_stop: true
   setup_score_floor: 0.0
 
+# Market trend filter. When on, no new longs open on days the index closes
+# below its sma_days simple average (open trades keep their normal exits).
+# Optional: also require the ticker itself above its own sma_days average.
+# Off by default until the comparison earns it a place:
+#   uv run signal-engine backtest --compare-trend-filter
+trend_filter:
+  enabled: false
+  index_symbol: SPY
+  sma_days: 200
+  require_ticker_above_sma: false
+
 # ─────────────────────────────────────────────────
 # PORTFOLIO SETTINGS
 # ─────────────────────────────────────────────────

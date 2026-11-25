@@ -396,9 +396,15 @@ class BacktestResult:
         )
 
     def save_equity_curve(self, output_path: Path) -> None:
-        """Save an interactive HTML equity curve to output_path."""
+        """Save an interactive HTML chart of the shared account's equity to output_path."""
         try:
-            fig = self.portfolio.plot()
+            import plotly.graph_objects as go
+
+            acct = self.account()
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=acct.equity.index, y=acct.equity.values, name="Account equity"))
+            fig.add_trace(go.Scatter(x=acct.invested.index, y=acct.invested.values, name="Invested"))
+            fig.update_layout(title="Backtest account equity", yaxis_title="$")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             fig.write_html(str(output_path))
             logger.info("Equity curve saved to %s", output_path)

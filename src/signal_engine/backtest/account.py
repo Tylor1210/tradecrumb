@@ -49,6 +49,7 @@ class PeriodStats:
     avg_pct: float = 0.0
     median_pct: float = 0.0
     positive_pct: float = 0.0      # share of periods that ended up
+    negative_pct: float = 0.0      # share that ended down (the rest were flat, e.g. all cash)
     best_pct: float = 0.0
     worst_pct: float = 0.0
 
@@ -58,6 +59,7 @@ class PeriodStats:
             "avg_pct": self.avg_pct,
             "median_pct": self.median_pct,
             "positive_pct": self.positive_pct,
+            "negative_pct": self.negative_pct,
             "best_pct": self.best_pct,
             "worst_pct": self.worst_pct,
         }
@@ -245,7 +247,8 @@ def _period_stats(rets: pd.Series) -> PeriodStats:
         periods=int(len(rets)),
         avg_pct=round(float(rets.mean()), 2),
         median_pct=round(float(rets.median()), 2),
-        positive_pct=round(float((rets > 0).mean() * 100), 1),
+        positive_pct=round(float((rets > 1e-9).mean() * 100), 1),
+        negative_pct=round(float((rets < -1e-9).mean() * 100), 1),
         best_pct=round(float(rets.max()), 2),
         worst_pct=round(float(rets.min()), 2),
     )
