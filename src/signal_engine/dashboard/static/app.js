@@ -919,8 +919,45 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    // ── Market regime card (fear/greed + pressure + latest weekly review) ──
+    function regimeEsc(v) {
+        return String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+    }
+
+    async function loadRegime(runNow = false) {
+        const body = document.getElementById("regime-body");
+        if (!body) return;
+        try {
+            const res = await fetch(runNow ? "/api/regime/run" : "/api/regime", { method: runNow ? "POST" : "GET" });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "request failed");
+            const r = data.latest;
+            const reviewRes = await fetch("/api/weekend-swing/weekly-review");
+            const review = (await reviewRes.json()).review;
+            if (!r) {
+                body.innerHTML = `No regime snapshot yet &mdash; click Refresh.`;
+                return;
+            }
+            const fg = r.fear_greed == null ? "n/a" : Math.round(r.fear_greed);
+            const dirColor = r.pressure_label === "BULLISH" ? "var(--color-buy)" : r.pressure_label === "BEARISH" ? "var(--color-sell)" : "var(--color-hold)";
+            const sectors = (r.sectors || []);
+            const fmtSec = s => `${regimeEsc(s.symbol)} ${s.flow >= 0 ? "+" : ""}${s.flow.toFixed(2)}`;
+            body.innerHTML = `
+                <div><strong>Fear/Greed ${fg}</strong> (${regimeEsc(r.fear_greed_label)}) &nbsp;|&nbsp;
+                     <strong style="color:${dirColor}">Pressure ${r.pressure >= 0 ? "+" : ""}${r.pressure.toFixed(2)} ${regimeEsc(r.pressure_label)}</strong>
+                     &nbsp;<span style="color:var(--text-muted)">as of ${regimeEsc(r.as_of)}</span></div>
+                <ul style="margin: 8px 0 0 18px;">${(r.summary || []).map(l => `<li>${regimeEsc(l)}</li>`).join("")}</ul>
+                ${sectors.length ? `<div style="margin-top:6px; color:var(--text-muted);">Sector flow: buying ${sectors.slice(0, 3).map(fmtSec).join(", ")} | selling ${sectors.slice(-3).reverse().map(fmtSec).join(", ")}</div>` : ""}
+                ${review ? `<div style="margin-top:10px;"><strong>Weekly review (${regimeEsc(review.week_start)})</strong><ul style="margin: 4px 0 0 18px;">${(review.findings || []).map(f => `<li>${regimeEsc(f)}</li>`).join("")}</ul></div>` : ""}`;
+        } catch (err) {
+            body.textContent = `Could not load regime: ${err.message}`;
+        }
+    }
+
+    document.getElementById("btn-regime-refresh")?.addEventListener("click", () => loadRegime(true));
+
     async function loadWeekendTabData() {
-        await Promise.all([loadWeekendScan(), loadWeekendTriggered(), loadWeekendActive()]);
+        await Promise.all([loadWeekendScan(), loadWeekendTriggered(), loadWeekendActive(), loadRegime()]);
     }
 
     // -- Scan Results --

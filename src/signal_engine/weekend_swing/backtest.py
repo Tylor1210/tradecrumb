@@ -43,6 +43,7 @@ class WeekendSwingTrade:
     return_pct: float
     gap_type: Optional[str] = None  # strategy 3 only
     breakdown: dict = field(default_factory=dict)  # the triggering signal's breakdown (volume ratio, ATR, etc.)
+    regime: Optional[dict] = None  # MarketRegime.to_dict() as of the trade's Monday (None if no provider set)
 
 
 @dataclass
@@ -147,11 +148,20 @@ def _mondays_between(start: pd.Timestamp, end: pd.Timestamp) -> list:
 class WeekendSwingBacktester:
     """Runs each strategy's real scan()/check_trigger() logic against cached historical bars."""
 
-    def __init__(self, config: dict, bar_store, finnhub_client=None) -> None:
+    def __init__(self, config: dict, bar_store, finnhub_client=None, regime_provider=None) -> None:
         self.config = config
         self.bar_store = bar_store
         self.finnhub_client = finnhub_client
+        # Optional market_regime.RegimeProvider. When set, every trade is tagged with the
+        # regime of its Monday so results can be sliced by fear/greed and pressure.
+        self.regime_provider = regime_provider
         self._earnings_cache: dict = {}
+
+    def _regime_for(self, week_start: pd.Timestamp) -> Optional[dict]:
+        if self.regime_provider is None:
+            return None
+        regime = self.regime_provider.as_of(week_start)
+        return regime.to_dict() if regime else None
 
     def _earnings_excluded_for_week(self, week_start: pd.Timestamp, week_end: pd.Timestamp) -> set:
         key = week_start.date()
@@ -207,7 +217,7 @@ class WeekendSwingBacktester:
                     entry_time=signal.date, entry_price=signal.entry_price, stop_price=signal.stop_price,
                     exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
                     return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
-                    breakdown=signal.breakdown,
+                    breakdown=signal.breakdown, regime=self._regime_for(week_start),
                 ))
 
         return trades
@@ -258,7 +268,7 @@ class WeekendSwingBacktester:
                     entry_time=signal.date, entry_price=signal.entry_price, stop_price=signal.stop_price,
                     exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
                     return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
-                    breakdown=signal.breakdown,
+                    breakdown=signal.breakdown, regime=self._regime_for(week_start),
                 ))
 
         return trades
@@ -324,7 +334,7 @@ class WeekendSwingBacktester:
                     exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
                     return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
                     gap_type=signal.breakdown.get("gap_type"),
-                    breakdown=signal.breakdown,
+                    breakdown=signal.breakdown, regime=self._regime_for(week_start),
                 )
                 if trade.gap_type == "gap_and_go":
                     go_trades.append(trade)

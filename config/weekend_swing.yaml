@@ -78,3 +78,19 @@ backtest:
 # dashboard's Weekend Swing tab. Nothing here ever triggers automatically.
 execution:
   fixed_trade_size: 1000.0        # $ notional per submitted signal, same convention as paper_trading.yaml's live day-trading
+
+# ─────────────────────────────────────────────────────────────
+# WEEKLY PAPER CYCLE (signal-engine weekly-cycle) — Alpaca PAPER account only
+# ─────────────────────────────────────────────────────────────
+# Unlike `execution` above (manual submit from the dashboard), this lane submits
+# automatically so the bot accumulates paper results every week.
+weekly_cycle:
+  auto_submit: true
+  # Strategy 2 is off by default: 102 of its 107 backtested trades (95%) were stopped
+  # out — the stop is the far edge of a tiny proxy range. Widening to 0.5-2x ATR looked
+  # better in the first half of the data and worse in the second, so it was NOT changed.
+  # Its signals are still logged and what-if scored in the weekly review; re-enable once
+  # the review shows positive EV.
+  auto_submit_strategies: [prior_week_breakout, gap_strength]
+  max_new_positions_per_week: 10
+  friday_close_time_et: "15:45"

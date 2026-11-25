@@ -1,0 +1,71 @@
+# Market Regime Configuration — Fear/Greed index + directional pressure.
+# Everything is computed from daily bars already available through Alpaca (IEX
+# feed), so no new data source. VIX itself is not on Alpaca; realized-vol ratio
+# stands in for it (see regime.py).
+
+# ─────────────────────────────────────────────────────────────
+# SYMBOLS
+# ─────────────────────────────────────────────────────────────
+symbols:
+  benchmark: SPY
+  bonds_long: TLT          # safe-haven demand: SPY vs TLT
+  junk: HYG                # junk-bond demand: HYG vs LQD
+  investment_grade: LQD
+  offensive: [XLY, XLK]    # risk-appetite rotation: offensive vs defensive
+  defensive: [XLP, XLU]
+  sectors: [XLK, XLY, XLF, XLV, XLE, XLI, XLP, XLU, XLB, XLRE, XLC]
+
+# ─────────────────────────────────────────────────────────────
+# FEAR / GREED (0 = extreme fear, 100 = extreme greed; each component 0-100)
+# ─────────────────────────────────────────────────────────────
+fear_greed:
+  momentum_sma_days: 125
+  momentum_range_pct: 6.0        # SPY +/-6% from its SMA maps to 100 / 0
+  breadth_sma_days: 50           # % of universe above its own SMA
+  min_breadth_symbols: 5
+  vol_short_days: 10
+  vol_long_days: 60
+  vol_ratio_fear: 1.8            # short/long realized-vol ratio at/above this = 0 (fear)
+  vol_ratio_greed: 0.6           # at/below this = 100 (greed)
+  safe_haven_days: 20
+  safe_haven_range_pct: 6.0      # SPY minus TLT return spread
+  junk_bond_days: 20
+  junk_bond_range_pct: 1.5       # HYG minus LQD return spread
+  rotation_days: 20
+  rotation_range_pct: 5.0        # offensive minus defensive sector return spread
+  min_components: 3              # below this many available, index is reported as unavailable
+  labels:                        # upper bounds, checked in order
+    - [25, "Extreme Fear"]
+    - [45, "Fear"]
+    - [55, "Neutral"]
+    - [75, "Greed"]
+    - [101, "Extreme Greed"]
+
+# ─────────────────────────────────────────────────────────────
+# DIRECTIONAL PRESSURE (-1 = heavy selling pressure, +1 = heavy buying pressure)
+# Chaikin-style money flow (where the bar closed within its range, volume-weighted)
+# + advance/decline + up-volume share. This is what answers "which way is the
+# pressure coming from".
+# ─────────────────────────────────────────────────────────────
+pressure:
+  flow_days: 10
+  flow_gain: 3.0                 # CMF is typically within +/-0.3; scaled so that maps to +/-0.9
+  ad_days: 5
+  trend_days: 5
+  trend_range_pct: 3.0           # SPY 5-day return of +/-3% maps to +/-1
+  bullish_threshold: 0.15
+  bearish_threshold: -0.15
+  narrow_breadth_ad: 0.45        # index pressure positive but A/D share below this = "narrow" rally
+
+# ─────────────────────────────────────────────────────────────
+# POLICY — how the regime changes trading. Disabled by default; turn on only
+# after `signal-engine weekend-regime-study` shows the effect out-of-sample.
+# ─────────────────────────────────────────────────────────────
+policy:
+  enabled: false
+  counter_trend_pressure: 0.25   # long when pressure <= -this, or short when >= +this, is "counter-trend"
+  counter_trend_action: reduce   # "skip" or "reduce"
+  counter_trend_size_mult: 0.5
+  crowded_greed_level: 80        # longs at/above this fear_greed level are "crowded"
+  crowded_fear_level: 20         # shorts at/below this level are "crowded"
+  crowded_size_mult: 1.0         # 1.0 = no effect; lower once validated

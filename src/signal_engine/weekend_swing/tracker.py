@@ -4,7 +4,10 @@ Weekend Swing Signals — persistent storage (Part 6).
 SQLite-backed, following the same conventions as paper_trading/tracker.py
 and trader_tracking/tracker.py: a status-progression lifecycle table rather
 than separate tables per state, since a signal moves through the same
-states in order (TRIGGERED -> SUBMITTED -> CLOSED, or TRIGGERED -> EXPIRED).
+states in order (TRIGGERED -> SUBMITTED -> CLOSED, or TRIGGERED -> EXPIRED /
+SKIPPED). SKIPPED = the weekly cycle deliberately did not trade it (strategy not
+enabled for auto-submit, regime policy, weekly cap); it is kept so the weekly
+review can score what the skip cost or saved.
 
 Stored in data/weekend_swing.db (gitignored). Scan results are a separate,
 replaced-per-week snapshot table (not a lifecycle) since they're
@@ -76,10 +79,22 @@ class WeekendSwingTracker:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    # Columns added after the first release; applied with ALTER so existing
+    # data/weekend_swing.db files keep working.
+    _MIGRATIONS = {
+        "regime_json": "TEXT",   # MarketRegime.to_dict() as of the trigger
+        "size_mult": "REAL",     # regime-policy size multiplier applied at submit
+        "skip_reason": "TEXT",
+    }
+
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(_CREATE_SCAN_RESULTS_SQL)
             conn.execute(_CREATE_SIGNALS_SQL)
+            have = {r[1] for r in conn.execute("PRAGMA table_info(weekend_signals)")}
+            for col, typ in self._MIGRATIONS.items():
+                if col not in have:
+                    conn.execute(f"ALTER TABLE weekend_signals ADD COLUMN {col} {typ}")
             conn.commit()
 
     # ── Scan results (replaced per week) ────────────────────────────────────
@@ -121,7 +136,7 @@ class WeekendSwingTracker:
 
     # ── Signal lifecycle: TRIGGERED -> SUBMITTED -> CLOSED / EXPIRED ───────
 
-    def log_triggered_signal(self, signal, week_start: str) -> str:
+    def log_triggered_signal(self, signal, week_start: str, regime: Optional[dict] = None) -> str:
         """
         Records a newly-fired signal as TRIGGERED. Idempotent per
         (week_start, ticker, strategy, gap_type): re-checking the same
@@ -145,14 +160,15 @@ class WeekendSwingTracker:
                 """
                 INSERT INTO weekend_signals (
                     signal_id, week_start, ticker, strategy, gap_type, direction,
-                    trigger_price, stop_price, triggered_at, breakdown_json, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TRIGGERED')
+                    trigger_price, stop_price, triggered_at, breakdown_json, status, regime_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TRIGGERED', ?)
                 """,
                 (
                     signal_id, week_start, signal.ticker, signal.strategy, gap_type, signal.direction,
                     signal.entry_price, signal.stop_price, signal.date.isoformat()
                     if hasattr(signal.date, "isoformat") else str(signal.date),
                     json.dumps(signal.breakdown, default=str),
+                    json.dumps(regime) if regime else None,
                 ),
             )
             conn.commit()
@@ -178,7 +194,8 @@ class WeekendSwingTracker:
         return dict(row) if row else None
 
     def submit_signal(
-        self, signal_id: str, qty: float, notional: float, broker_trade_id: str, entry_price: float
+        self, signal_id: str, qty: float, notional: float, broker_trade_id: str, entry_price: float,
+        size_mult: Optional[float] = None,
     ) -> bool:
         """TRIGGERED -> SUBMITTED. Becomes an 'active position' on the page."""
         with sqlite3.connect(self.db_path) as conn:
@@ -186,10 +203,10 @@ class WeekendSwingTracker:
                 """
                 UPDATE weekend_signals
                 SET status = 'SUBMITTED', qty = ?, notional = ?, broker_trade_id = ?,
-                    entry_price = ?, submitted_at = ?
+                    entry_price = ?, submitted_at = ?, size_mult = ?
                 WHERE signal_id = ? AND status = 'TRIGGERED'
                 """,
-                (qty, notional, broker_trade_id, entry_price, datetime.now().isoformat(), signal_id),
+                (qty, notional, broker_trade_id, entry_price, datetime.now().isoformat(), size_mult, signal_id),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -232,6 +249,25 @@ class WeekendSwingTracker:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    def skip_signal(self, signal_id: str, reason: str) -> bool:
+        """TRIGGERED -> SKIPPED: deliberately not traded; kept for the weekly review's what-if scoring."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE weekend_signals SET status = 'SKIPPED', skip_reason = ? "
+                "WHERE signal_id = ? AND status = 'TRIGGERED'",
+                (reason, signal_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_week_signals(self, week_start: str) -> list:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM weekend_signals WHERE week_start = ? ORDER BY triggered_at", (week_start,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── History / summary ───────────────────────────────────────────────────
 
