@@ -31,6 +31,8 @@ class BacktestMetrics:
     max_drawdown_pct: float         # worst peak-to-trough on equity curve
     sharpe_ratio: float             # annualized Sharpe
     directional_accuracy_pct: float # % signals where price moved in predicted direction
+    avg_loss_pct: float = 0.0       # mean return of losing trades (negative)
+    worst_trade_pct: float = 0.0    # single worst trade return (negative)
 
     WIN_RATE_TARGET = 70.0          # class constant: the 70% bar
 
@@ -53,6 +55,8 @@ class BacktestMetrics:
             "max_drawdown_pct": self.max_drawdown_pct,
             "sharpe_ratio": self.sharpe_ratio,
             "directional_accuracy_pct": self.directional_accuracy_pct,
+            "avg_loss_pct": self.avg_loss_pct,
+            "worst_trade_pct": self.worst_trade_pct,
             "meets_70pct_target": self.meets_win_rate_target,
         }
 
@@ -69,6 +73,8 @@ class BacktestMetrics:
             f"  Total Trades:        {self.total_trades}\n"
             f"  Winning Trades:      {self.winning_trades}\n"
             f"  Losing Trades:       {self.losing_trades}\n"
+            f"  Avg Losing Trade:    {self.avg_loss_pct:+.2f}%\n"
+            f"  Worst Trade:         {self.worst_trade_pct:+.2f}%\n"
             f"  Max Drawdown:        {self.max_drawdown_pct:.2f}%\n"
             f"  Sharpe Ratio:        {self.sharpe_ratio:.3f}\n"
             f"  Dir. Accuracy:       {dir_acc}\n"

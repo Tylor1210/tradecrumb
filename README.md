@@ -89,6 +89,14 @@ uv run signal-engine backtest
 uv run signal-engine backtest --grid-search
 ```
 
+**Per-trade loss cap (10% review / 20% get out).** Configured under `loss_cap:` in `config/backtest.yaml` and `config/weekend_swing.yaml` (logic in `src/signal_engine/risk/loss_cap.py`). Under 10% down nothing changes. At 10%+ down a trade stays open only while its setup still shows a chance of gain, and closes on the first bar it doesn't. At 20%+ down it starts closing, on the next weak bar or within `exit_within_bars` bars. A 25% backstop closes it no matter what. Checks run on closes, so a gap can overshoot a level; reports show the worst single trade so that's visible.
+
+```bash
+# Old exits vs the loss cap, side by side, with win rate vs the 60-70% bar
+uv run signal-engine backtest --compare-exits
+uv run signal-engine weekend-backtest --compare-exits
+```
+
 Results are saved to `reports/`. The win rate output clearly shows ✅ (≥70%) or ❌ (<70%) against the target before you consider activating paper trading.
 
 **Tuning workflow:**
