@@ -93,4 +93,5 @@ weekly_cycle:
   # the review shows positive EV.
   auto_submit_strategies: [prior_week_breakout, gap_strength]
   max_new_positions_per_week: 10
+  max_signal_age_minutes: 45     # older signals (late run, slept Mac) are skipped, not ordered
   friday_close_time_et: "15:45"

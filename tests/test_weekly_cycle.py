@@ -4,7 +4,9 @@ import sqlite3
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
+from signal_engine.weekend_swing import weekly_cycle
 from signal_engine.weekend_swing.review import _findings
 from signal_engine.weekend_swing.tracker import WeekendSwingTracker
 from signal_engine.weekend_swing.weekly_cycle import auto_phases, current_week_start, previous_week_start
@@ -87,3 +89,49 @@ def test_findings_missed_movers_and_skip_cost():
              skipped_whatif={"n": 4, "ev_pct": 1.5})
     f = " ".join(_findings(rv, [], [], {"ALL": {"n": 0, "ev_pct": None}}))
     assert "NVDA" in f and "skip rules cost money" in f
+
+
+# ── Late-trigger guard: Monday signals must never be ordered at later prices ──
+
+def _cycle(tmp_path, monkeypatch, signal_time="2026-11-23 10:00"):
+    """A cycle holding one un-submitted signal for the week of Nov 23; records orders instead of sending them."""
+    monkeypatch.setattr(weekly_cycle, "RegimeStore", lambda: None)
+    tracker = WeekendSwingTracker(tmp_path / "w.db")
+    tracker.save_scan_results("2026-11-23", [{
+        "ticker": "AAPL", "strategy": "prior_week_breakout", "pivot_high": 101.0, "pivot_low": 95.0,
+        "current_price": 100.0, "distance_pct": 1.0,
+    }])
+    signal = _signal()
+    signal.date = et(signal_time)  # bar timestamps are tz-aware UTC
+    sid = tracker.log_triggered_signal(signal, "2026-11-23")
+    cyc = weekly_cycle.WeeklyCycle({}, {}, None, None, None, tracker, log=lambda msg: None)
+    cyc.regime_snapshot = lambda *a, **k: None
+    orders = []
+    cyc._submit = lambda s, notional, mult: orders.append(s["ticker"]) or True
+    return cyc, tracker, sid, orders
+
+
+@pytest.mark.parametrize("when", [
+    "2026-11-24 10:00",  # Tuesday
+    "2026-11-27 10:00",  # Friday
+    "2026-11-23 09:00",  # Monday before the open
+    "2026-11-23 16:15",  # Monday after the close (a DAY order would queue for Tuesday)
+])
+def test_trigger_outside_monday_session_sends_no_orders(tmp_path, monkeypatch, when):
+    cyc, tracker, sid, orders = _cycle(tmp_path, monkeypatch)
+    assert cyc.trigger(et(when)) == {"new": 0}
+    assert orders == []
+    assert tracker.get_signal(sid)["status"] == "TRIGGERED"  # left for the review's what-if scoring
+
+
+def test_trigger_skips_stale_signal_on_monday(tmp_path, monkeypatch):
+    cyc, tracker, sid, orders = _cycle(tmp_path, monkeypatch)  # fired 10:00, checked 15:00
+    cyc.trigger(et("2026-11-23 15:00"))
+    row = tracker.get_signal(sid)
+    assert orders == [] and row["status"] == "SKIPPED" and row["skip_reason"].startswith("stale")
+
+
+def test_trigger_submits_fresh_signal_on_monday(tmp_path, monkeypatch):
+    cyc, _, _, orders = _cycle(tmp_path, monkeypatch)
+    cyc.trigger(et("2026-11-23 10:30"))  # 15-min bar stamped 10:00 closed at 10:15
+    assert orders == ["AAPL"]
