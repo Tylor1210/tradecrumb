@@ -3,7 +3,7 @@ Weekly paper-trading cycle: the automation that runs the weekend-swing lane
 end to end, every week, on the Alpaca PAPER account only.
 
   scan     (Sat/Sun)      regime snapshot + weekend shortlist saved
-  trigger  (Mon, polled)  check shortlist for triggers, apply regime policy, auto-submit paper orders
+  trigger  (Mon session)  check shortlist for triggers, apply regime policy, auto-submit paper orders
   manage   (Mon-Fri, polled) enforce stops, close everything at Friday 15:45 ET, expire stale signals
   review   (Fri eve/Sat)  weekly review report (what worked, what we skipped, what we're missing)
 
@@ -52,6 +52,9 @@ DEFAULT_CYCLE_CFG = {
     # (stop = far edge of a tiny range). Its signals are still logged and scored as what-ifs.
     "auto_submit_strategies": ["prior_week_breakout", "gap_strength"],
     "max_new_positions_per_week": 10,
+    # Age is measured from the signal bar's START: a 15-min bar closes 15 min later and
+    # polling adds up to another 15, so 45 leaves one missed poll of slack.
+    "max_signal_age_minutes": 45,
     "friday_close_time_et": "15:45",
 }
 
@@ -71,6 +74,18 @@ def previous_week_start(now: pd.Timestamp) -> pd.Timestamp:
     d = now.tz_convert(ET).normalize().tz_localize(None)
     d -= pd.Timedelta(days=d.weekday())
     return pd.Timestamp(d.date(), tz="UTC")
+
+
+def in_monday_session(now: pd.Timestamp) -> bool:
+    """True only during Monday's regular session, 09:30 up to (not including) 16:00 ET."""
+    et = now.tz_convert(ET)
+    return et.weekday() == 0 and 9 * 60 + 30 <= et.hour * 60 + et.minute < 16 * 60
+
+
+def _signal_age_minutes(triggered_at: str, now: pd.Timestamp) -> float:
+    fired = pd.Timestamp(triggered_at)
+    fired = fired.tz_localize("UTC") if fired.tzinfo is None else fired  # bar timestamps are UTC
+    return (now - fired).total_seconds() / 60
 
 
 def auto_phases(now: pd.Timestamp) -> list:
@@ -141,11 +156,13 @@ class WeeklyCycle:
             GapStrengthStrategy, OvernightRangeBreakoutStrategy, PriorWeekBreakoutStrategy,
         )
 
+        # CONSTRAINT: orders are market orders at the current price, so a Monday signal found on
+        # a later day (or queued after the close) would fill far from its trigger and stop levels.
+        if not in_monday_session(now):
+            self.log("trigger: outside Monday's session (09:30-16:00 ET) — nothing checked or submitted")
+            return {"new": 0}
         week_start = current_week_start(now)
         ws_str = week_start.date().isoformat()
-        if now < week_start:
-            self.log("trigger: before Monday — nothing to check")
-            return {"new": 0}
 
         candidates = self.tracker.get_scan_results(ws_str)
         if not candidates:
@@ -180,10 +197,10 @@ class WeeklyCycle:
             self.log(f"trigger: {signal.ticker} {signal.strategy} {signal.direction.upper()} "
                      f"@ {signal.entry_price:.2f} stop {signal.stop_price:.2f}")
 
-        submitted = self._auto_submit(ws_str) if self.cfg["auto_submit"] else 0
+        submitted = self._auto_submit(ws_str, now) if self.cfg["auto_submit"] else 0
         return {"new": len(new_ids), "submitted": submitted}
 
-    def _auto_submit(self, ws_str: str) -> int:
+    def _auto_submit(self, ws_str: str, now: pd.Timestamp) -> int:
         trade_size = self.ws_cfg.get("execution", {}).get("fixed_trade_size", 1000.0)
         week = self.tracker.get_week_signals(ws_str)
         taken = sum(1 for s in week if s["status"] in ("SUBMITTED", "CLOSED"))
@@ -193,6 +210,12 @@ class WeeklyCycle:
                 continue
             if s["strategy"] not in self.cfg["auto_submit_strategies"]:
                 self.tracker.skip_signal(s["signal_id"], "strategy not enabled for auto-submit")
+                continue
+            # WHY: even on Monday, a machine that slept (or a retried failed order) can surface a signal hours late.
+            age, limit = _signal_age_minutes(s["triggered_at"], now), self.cfg["max_signal_age_minutes"]
+            if age > limit:
+                self.tracker.skip_signal(s["signal_id"], f"stale: signal bar is {age:.0f} min old (limit {limit})")
+                self.log(f"skip: {s['ticker']} {s['direction']} — stale ({age:.0f} min old)")
                 continue
             if taken >= self.cfg["max_new_positions_per_week"]:
                 self.tracker.skip_signal(s["signal_id"], "weekly position cap reached")
