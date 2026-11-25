@@ -45,9 +45,15 @@ loss_cap:
 # ─────────────────────────────────────────────────
 # PORTFOLIO SETTINGS
 # ─────────────────────────────────────────────────
+# Account sizing for Return, Max DD, CAGR and the weekly/monthly stats.
+# All tickers share one cash balance. Each new trade gets position_size_pct of
+# current account equity (cash + open positions at that day's close), never
+# more than free cash. Once max_positions trades are open, new signals are
+# skipped until one closes. 10% x 10 positions = fully invested at most, no
+# leverage. Win rate / avg loss / worst trade still count every signal.
 initial_capital: 100000.0  # paper portfolio starting value ($)
-position_size_pct: 5.0     # % of portfolio allocated per signal trade
-max_positions: 10          # max concurrent positions
+position_size_pct: 10.0    # % of current account equity per new trade
+max_positions: 10          # most trades open at once
 
 # ─────────────────────────────────────────────────
 # WIN RATE TARGET

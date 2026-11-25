@@ -423,7 +423,8 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 stop_loss_pct=bt_cfg.get("stop_loss_pct", 5.0),
                 take_profit_pct=bt_cfg.get("take_profit_pct", 10.0),
                 initial_capital=bt_cfg.get("initial_capital", 100000.0),
-                position_size_pct=bt_cfg.get("position_size_pct", 5.0),
+                position_size_pct=bt_cfg.get("position_size_pct", 10.0),
+                max_positions=int(bt_cfg.get("max_positions", 10)),
                 loss_cap=rule,
                 setup_score_floor=float(loss_cap_cfg.get("setup_score_floor", 0.0)),
             )
@@ -435,6 +436,7 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 res = BacktestEngine(_make_config(rule)).run(price_data, signals, setup_scores)
                 rows.append((label, res.get_metrics(), res.exit_reasons))
             _print_exit_comparison(rows)
+            _print_account_comparison(rows, _benchmark(price_data, bt_cfg))
             return
 
         bt_config_obj = _make_config(loss_cap_rule)
@@ -454,6 +456,7 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 metrics.directional_accuracy_pct = round(sum(dir_acc_values) / len(dir_acc_values), 2)
 
             console.print(metrics)
+            _print_account_comparison([("This run", metrics, None)], _benchmark(price_data, bt_cfg))
             if result.exit_reasons:
                 console.print(f"[dim]Exit reasons: {result.exit_reasons}[/dim]")
 
@@ -475,6 +478,46 @@ def _bar_check(win_rate: float, trades: int) -> str:
     if win_rate >= 60:
         return "🟡 60-70%"
     return "❌ <60%"
+
+
+def _benchmark(price_data: dict, bt_cfg: dict):
+    """Buy and hold SPY over the same dates, as a yardstick. None if SPY wasn't loaded."""
+    from signal_engine.backtest.account import buy_and_hold_stats
+
+    spy = price_data.get("SPY")
+    if spy is None or "close" not in spy:
+        return None
+    return buy_and_hold_stats(spy["close"], float(bt_cfg.get("initial_capital", 100000.0)))
+
+
+def _print_account_comparison(rows: list, benchmark=None) -> None:
+    """One shared account per row: does it grow steadily week to week and month to month?"""
+    table = Table(title="Account growth (one shared account)", box=box.ROUNDED)
+    for col in ["Run", "Return", "CAGR", "Max DD", "Sharpe", "Avg Week", "Weeks Up",
+                "Worst Week", "Avg Month", "Months Up", "Worst Month"]:
+        table.add_column(col, justify="left" if col == "Run" else "right")
+
+    def _row(label, a):
+        w, m = a.weekly, a.monthly
+        table.add_row(
+            label, f"{a.total_return_pct:+.1f}%", f"{a.cagr_pct:+.1f}%", f"{a.max_drawdown_pct:.1f}%",
+            f"{a.sharpe_ratio:.2f}", f"{w.avg_pct:+.2f}%", f"{w.positive_pct:.0f}%", f"{w.worst_pct:+.1f}%",
+            f"{m.avg_pct:+.2f}%", f"{m.positive_pct:.0f}%", f"{m.worst_pct:+.1f}%",
+        )
+
+    for label, m, _reasons in rows:
+        if m.account is not None:
+            _row(label, m.account)
+    if benchmark is not None:
+        _row("Buy and hold SPY", benchmark)
+    console.print(table)
+    for label, m, _reasons in rows:
+        a = m.account
+        if a is not None:
+            console.print(
+                f"[dim]{label}: took {a.trades_taken} trades ({a.trades_skipped} skipped with positions full), "
+                f"{a.win_rate_pct:.1f}% of taken trades won, {a.avg_invested_pct:.0f}% of equity invested on average[/dim]"
+            )
 
 
 def _print_exit_comparison(rows: list) -> None:

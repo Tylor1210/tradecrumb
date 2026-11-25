@@ -19,6 +19,12 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 
+from signal_engine.backtest.account import (
+    AccountResult,
+    AccountSizing,
+    simulate_account,
+    trades_from_portfolio,
+)
 from signal_engine.backtest.metrics import BacktestMetrics, compute_directional_accuracy
 from signal_engine.risk.loss_cap import LossCapRule
 
@@ -35,7 +41,10 @@ class BacktestConfig:
     stop_loss_pct: float    # e.g. 5.0 = 5%
     take_profit_pct: float  # e.g. 10.0 = 10%
     initial_capital: float  # e.g. 100000
-    position_size_pct: float = 5.0  # % of portfolio per trade
+    # Account sizing (see backtest/account.py): each new trade gets this % of
+    # current account equity, at most max_positions open at once.
+    position_size_pct: float = 10.0
+    max_positions: int = 10
     # Optional 10%/20% per-trade loss cap (see risk/loss_cap.py). None keeps
     # the original vectorbt sl_stop/tp_stop path exactly as it was.
     loss_cap: Optional[LossCapRule] = None
@@ -310,15 +319,40 @@ class BacktestResult:
         self.close_df = close_df
         # Only filled on the loss-cap path: how many trades closed for each reason.
         self.exit_reasons = exit_reasons or {}
+        self._account: Optional[AccountResult] = None
+
+    def account(self) -> AccountResult:
+        """
+        Replay the trades through one shared account with the configured sizing.
+
+        The vectorbt portfolio keeps separate cash per ticker, so its
+        total_return/max_drawdown are per-ticker Series on multi-ticker runs.
+        Account return, drawdown, Sharpe and weekly/monthly stats come from
+        here instead.
+        """
+        if self._account is None:
+            sizing = AccountSizing(
+                position_size_pct=self.config.position_size_pct,
+                max_positions=self.config.max_positions,
+                fees_pct=0.1,  # same 0.1% per side as the vectorbt runs
+            )
+            self._account = simulate_account(
+                trades_from_portfolio(self.portfolio),
+                self.close_df,
+                self.config.initial_capital,
+                sizing,
+            )
+        return self._account
 
     def get_metrics(self) -> BacktestMetrics:
-        """Compute and return BacktestMetrics from the vectorbt portfolio."""
+        """Compute BacktestMetrics: trade stats from every signal, account stats from one account."""
         pf = self.portfolio
 
         try:
-            total_return = float(pf.total_return())
-        except Exception:
-            total_return = 0.0
+            acct = self.account().stats()
+        except Exception as exc:
+            logger.warning("Could not compute account stats: %s", exc)
+            acct = None
 
         try:
             trades = pf.trades
@@ -344,18 +378,12 @@ class BacktestResult:
             avg_loss = 0.0
             worst_trade = 0.0
 
-        try:
-            max_dd = float(pf.max_drawdown() * 100)
-        except Exception:
-            max_dd = 0.0
-
-        try:
-            sharpe = float(pf.sharpe_ratio())
-        except Exception:
-            sharpe = 0.0
+        total_return = acct.total_return_pct if acct else 0.0
+        max_dd = acct.max_drawdown_pct if acct else 0.0
+        sharpe = acct.sharpe_ratio if acct else 0.0
 
         return BacktestMetrics(
-            total_return_pct=round(total_return * 100, 2),
+            total_return_pct=round(total_return, 2),
             win_rate_pct=round(win_rate, 2),
             total_trades=total_trades,
             winning_trades=winning_trades,
@@ -364,6 +392,7 @@ class BacktestResult:
             directional_accuracy_pct=0.0,  # computed by grid_search
             avg_loss_pct=round(avg_loss, 2),
             worst_trade_pct=round(worst_trade, 2),
+            account=acct,
         )
 
     def save_equity_curve(self, output_path: Path) -> None:
