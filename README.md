@@ -97,6 +97,14 @@ uv run signal-engine backtest --compare-exits
 uv run signal-engine weekend-backtest --compare-exits
 ```
 
+**Partial profit taking (sell half at +20%, let the rest run).** Configured under `scale_out:` in the same two files (logic in `src/signal_engine/risk/scale_out.py`), off by default. The first close at +20% sells 50% and keeps the rest as a runner while the setup still points to continuation, or closes it all if it doesn't. If the trade got there fast (within `fast_move_bars` closes of entry, or a single bar over `fast_move_atr_mult` x ATR14) nothing is forced; the full position rides a trailing stop instead. The runner closes on an 8% trail off its best close, the setup turning, or a close back at breakeven, so a winner never turns into a loser. In the daily backtest it switches off the 10% take profit (which would always fire first) and lets the runner outlive the hold period up to `runner_max_bars`. In the weekend backtest the Friday close still ends every trade. A partly sold trade counts as one trade with its blended return.
+
+```bash
+# Current exits vs scale-out, side by side, plus how many trades ever reached +20%
+uv run signal-engine backtest --compare-scale-out
+uv run signal-engine weekend-backtest --compare-scale-out
+```
+
 Results are saved to `reports/`. The win rate output clearly shows ✅ (≥70%) or ❌ (<70%) against the target before you consider activating paper trading.
 
 **Tuning workflow:**
