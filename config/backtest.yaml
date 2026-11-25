@@ -21,6 +21,27 @@ hold_period_days: 5
 stop_loss_pct: 5.0       # exit if loss exceeds this %
 take_profit_pct: 10.0    # exit if gain exceeds this %
 
+# Per-trade loss cap ("10% review / 20% get out"). See src/signal_engine/risk/loss_cap.py.
+#  - under 10% down: normal exits only
+#  - 10%+ down: stay in only while the setup still shows a chance of gain
+#    (the entry's technical score is >= setup_score_floor on that bar),
+#    close on the first bar it doesn't
+#  - 20%+ down: start closing — exit on the first weak bar, or after
+#    exit_within_bars more bars at the latest
+#  - backstop_loss_pct: close immediately, no exceptions
+# replaces_fixed_stop: true turns off stop_loss_pct above, since a 5% flat
+# stop would always fire before 10% and the rule would never run.
+# Checks happen on daily closes, so a gap can overshoot a threshold.
+# Compare against the old exits with: uv run signal-engine backtest --compare-exits
+loss_cap:
+  enabled: true
+  review_loss_pct: 10.0
+  exit_loss_pct: 20.0
+  exit_within_bars: 2
+  backstop_loss_pct: 25.0
+  replaces_fixed_stop: true
+  setup_score_floor: 0.0
+
 # ─────────────────────────────────────────────────
 # PORTFOLIO SETTINGS
 # ─────────────────────────────────────────────────

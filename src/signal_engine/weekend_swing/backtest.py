@@ -24,6 +24,7 @@ from typing import Optional
 import pandas as pd
 import vectorbt as vbt  # noqa: F401 (registers the .vbt accessor)
 
+from signal_engine.risk.loss_cap import LossCapRule, loss_pct_from_entry
 from signal_engine.weekend_swing.earnings import get_earnings_exclusions
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class WeekendSwingTrade:
     stop_price: float
     exit_time: object
     exit_price: float
-    exit_reason: str  # "stopped_out" | "friday_close"
+    exit_reason: str  # "stopped_out" | "friday_close" | "loss_cap_*" (see risk/loss_cap.py)
     return_pct: float
     gap_type: Optional[str] = None  # strategy 3 only
     breakdown: dict = field(default_factory=dict)  # the triggering signal's breakdown (volume ratio, ATR, etc.)
@@ -55,6 +56,8 @@ class WeekendSwingBacktestMetrics:
     max_drawdown_pct: float
     trade_count: int
     gap_type: Optional[str] = None  # set only for strategy 3's split reporting
+    worst_trade_pct: float = 0.0    # single worst trade return (negative)
+    loss_cap_exits: int = 0         # trades closed by the 10%/20% loss cap
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +66,8 @@ class WeekendSwingBacktestMetrics:
             "win_rate_pct": self.win_rate_pct,
             "avg_win_pct": self.avg_win_pct,
             "avg_loss_pct": self.avg_loss_pct,
+            "worst_trade_pct": self.worst_trade_pct,
+            "loss_cap_exits": self.loss_cap_exits,
             "max_drawdown_pct": self.max_drawdown_pct,
             "trade_count": self.trade_count,
         }
@@ -98,6 +103,8 @@ def _compute_metrics(
         max_drawdown_pct=round(max_dd, 2),
         trade_count=len(trades),
         gap_type=gap_type,
+        worst_trade_pct=round(min(returns_pct), 2),
+        loss_cap_exits=sum(1 for t in trades if t.exit_reason.startswith("loss_cap")),
     )
 
 
@@ -110,11 +117,19 @@ def _simulate_exit(
     daily_df: pd.DataFrame,
     week_start: pd.Timestamp,
     week_end: pd.Timestamp,
+    loss_cap: Optional[LossCapRule] = None,
 ) -> tuple:
     """
     Walks forward from entry: checks the rest of the entry day's intraday
     bars for a stop touch, then daily bars through week_end (Friday).
     Returns (exit_price, exit_reason, exit_time).
+
+    When `loss_cap` is set it runs on each daily close after the stop check
+    (it never loosens the strategy's own stop). "Setup still shows a chance
+    of gain" here means buyers stepped in that day: the daily bar closed
+    above its open for a long (below its open for a short). With today's tight
+    ATR-based stops the stop almost always fires long before a 10% loss, so
+    in practice the cap only matters if stops are widened or removed.
     """
     remaining_today = entry_day_intraday_df.loc[entry_day_intraday_df.index > entry_time]
     for idx, row in remaining_today.iterrows():
@@ -125,12 +140,20 @@ def _simulate_exit(
 
     rest_of_week = daily_df.loc[(daily_df.index > week_start) & (daily_df.index <= week_end)]
     exit_price, exit_time = entry_price, entry_time
+    cap_state = loss_cap.new_trade() if loss_cap is not None else None
     for idx, row in rest_of_week.iterrows():
         if direction == "long" and float(row["low"]) <= stop_price:
             return stop_price, "stopped_out", idx
         if direction == "short" and float(row["high"]) >= stop_price:
             return stop_price, "stopped_out", idx
-        exit_price, exit_time = float(row["close"]), idx
+        close = float(row["close"])
+        if cap_state is not None:
+            day_open = float(row["open"])
+            buyers_in = close > day_open if direction == "long" else close < day_open
+            reason = cap_state.update(loss_pct_from_entry(direction, entry_price, close), buyers_in)
+            if reason is not None:
+                return close, reason, idx
+        exit_price, exit_time = close, idx
 
     return exit_price, "friday_close", exit_time
 
@@ -156,6 +179,7 @@ class WeekendSwingBacktester:
         # regime of its Monday so results can be sliced by fear/greed and pressure.
         self.regime_provider = regime_provider
         self._earnings_cache: dict = {}
+        self.loss_cap = LossCapRule.from_config(config.get("loss_cap"))
 
     def _regime_for(self, week_start: pd.Timestamp) -> Optional[dict]:
         if self.regime_provider is None:
@@ -210,7 +234,7 @@ class WeekendSwingBacktester:
 
                 exit_price, exit_reason, exit_time = _simulate_exit(
                     signal.direction, signal.entry_price, signal.stop_price, signal.date,
-                    monday_bars, daily_df, week_start, week_end,
+                    monday_bars, daily_df, week_start, week_end, loss_cap=self.loss_cap,
                 )
                 trades.append(WeekendSwingTrade(
                     ticker=ticker, strategy="prior_week_breakout", direction=signal.direction,
@@ -261,7 +285,7 @@ class WeekendSwingBacktester:
 
                 exit_price, exit_reason, exit_time = _simulate_exit(
                     signal.direction, signal.entry_price, signal.stop_price, signal.date,
-                    monday_bars, daily_df, week_start, week_end,
+                    monday_bars, daily_df, week_start, week_end, loss_cap=self.loss_cap,
                 )
                 trades.append(WeekendSwingTrade(
                     ticker=ticker, strategy="overnight_range_breakout", direction=signal.direction,
@@ -326,7 +350,7 @@ class WeekendSwingBacktester:
 
                 exit_price, exit_reason, exit_time = _simulate_exit(
                     signal.direction, signal.entry_price, signal.stop_price, signal.date,
-                    monday_bars, daily_df, week_start, week_end,
+                    monday_bars, daily_df, week_start, week_end, loss_cap=self.loss_cap,
                 )
                 trade = WeekendSwingTrade(
                     ticker=ticker, strategy="gap_strength", direction=signal.direction,

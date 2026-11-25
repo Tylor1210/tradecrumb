@@ -63,6 +63,22 @@ strategy_3_gap:
   atr_period: 14
 
 # ─────────────────────────────────────────────────────────────
+# PER-TRADE LOSS CAP (10% review / 20% get out)
+# ─────────────────────────────────────────────────────────────
+# Runs on daily closes on top of each strategy's own stop (never loosens it).
+# 10%+ down: stay in only while the day closes above its open (buyers stepping
+# in; below its open for shorts). 20%+ down: exit on the next day that doesn't,
+# or within exit_within_bars days at the latest.
+# With the current tight ATR stops this almost never fires; it's here so the
+# cap holds if stops are widened. See src/signal_engine/risk/loss_cap.py.
+loss_cap:
+  enabled: true
+  review_loss_pct: 10.0
+  exit_loss_pct: 20.0
+  exit_within_bars: 2
+  backstop_loss_pct: 25.0
+
+# ─────────────────────────────────────────────────────────────
 # BACKTEST DEFAULTS
 # ─────────────────────────────────────────────────────────────
 backtest:

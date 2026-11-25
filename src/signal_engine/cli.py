@@ -283,8 +283,9 @@ def scan(date, signals_config, watchlist_config, top):
 @click.option("--signals", "sig_config", default="signals.yaml", help="Signal config file")
 @click.option("--watchlist", "wl_config", default="watchlist.yaml", help="Watchlist file")
 @click.option("--grid-search", is_flag=True, help="Run full weight grid search")
+@click.option("--compare-exits", is_flag=True, help="Run old exits vs the 10%/20% loss cap side by side")
 @click.option("--output-dir", default="reports", help="Output directory for results")
-def backtest(bt_config, sig_config, wl_config, grid_search, output_dir):
+def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, output_dir):
     """Run backtest against historical data. Use --grid-search to sweep weight combos."""
     from signal_engine.data.alpaca_client import AlpacaDataClient
     from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
@@ -377,8 +378,21 @@ def backtest(bt_config, sig_config, wl_config, grid_search, output_dir):
         from signal_engine.signals.technical import TechnicalAnalyzer
         from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
 
+        from signal_engine.risk.loss_cap import LossCapRule
+
+        loss_cap_cfg = bt_cfg.get("loss_cap") or {}
+        loss_cap_rule = LossCapRule.from_config(loss_cap_cfg)
+
         console.print(f"Hold period: {bt_cfg.get('hold_period_days', 5)} days")
-        console.print(f"Stop loss: {bt_cfg.get('stop_loss_pct', 5.0)}% | Take profit: {bt_cfg.get('take_profit_pct', 10.0)}%\n")
+        console.print(f"Stop loss: {bt_cfg.get('stop_loss_pct', 5.0)}% | Take profit: {bt_cfg.get('take_profit_pct', 10.0)}%")
+        if loss_cap_rule is not None:
+            console.print(
+                f"Loss cap: review at {loss_cap_rule.review_loss_pct:g}% down, start closing at "
+                f"{loss_cap_rule.exit_loss_pct:g}% (within {loss_cap_rule.exit_within_bars} bars), "
+                f"backstop {loss_cap_rule.backstop_loss_pct:g}%"
+                + (" — replaces the flat stop" if loss_cap_rule.replaces_fixed_stop else "")
+            )
+        console.print()
 
         tech_analyzer = TechnicalAnalyzer(sig_cfg.get("technical", {}))
         buy_threshold = thresholds.get("buy_signal", 0.55)
@@ -386,30 +400,48 @@ def backtest(bt_config, sig_config, wl_config, grid_search, output_dir):
         # Generate technical signals for each ticker
         import pandas as pd
         signals: dict = {}
+        setup_scores: dict = {}  # per-bar technical score, used by the loss cap
         for ticker, df in price_data.items():
             sig_dates = []
             sig_vals = []
+            score_vals = []
             for i in range(200, len(df)):
                 sub = df.iloc[:i + 1]
                 ts = tech_analyzer.compute(ticker, sub)
                 sig_dates.append(df.index[i])
                 sig_vals.append(ts.score >= buy_threshold if ts else False)
+                score_vals.append(ts.score if ts else float("nan"))
             if sig_dates:
                 signals[ticker] = pd.Series(sig_vals, index=sig_dates)
+                setup_scores[ticker] = pd.Series(score_vals, index=sig_dates)
 
-        bt_config_obj = BacktestConfig(
-            start_date=bt_cfg["start_date"],
-            end_date=bt_cfg["end_date"],
-            hold_period_days=bt_cfg.get("hold_period_days", 5),
-            stop_loss_pct=bt_cfg.get("stop_loss_pct", 5.0),
-            take_profit_pct=bt_cfg.get("take_profit_pct", 10.0),
-            initial_capital=bt_cfg.get("initial_capital", 100000.0),
-            position_size_pct=bt_cfg.get("position_size_pct", 5.0),
-        )
+        def _make_config(rule):
+            return BacktestConfig(
+                start_date=bt_cfg["start_date"],
+                end_date=bt_cfg["end_date"],
+                hold_period_days=bt_cfg.get("hold_period_days", 5),
+                stop_loss_pct=bt_cfg.get("stop_loss_pct", 5.0),
+                take_profit_pct=bt_cfg.get("take_profit_pct", 10.0),
+                initial_capital=bt_cfg.get("initial_capital", 100000.0),
+                position_size_pct=bt_cfg.get("position_size_pct", 5.0),
+                loss_cap=rule,
+                setup_score_floor=float(loss_cap_cfg.get("setup_score_floor", 0.0)),
+            )
+
+        if compare_exits:
+            rule_for_compare = loss_cap_rule or LossCapRule()
+            rows = []
+            for label, rule in [("Old exits (flat stop)", None), ("10%/20% loss cap", rule_for_compare)]:
+                res = BacktestEngine(_make_config(rule)).run(price_data, signals, setup_scores)
+                rows.append((label, res.get_metrics(), res.exit_reasons))
+            _print_exit_comparison(rows)
+            return
+
+        bt_config_obj = _make_config(loss_cap_rule)
 
         try:
             engine = BacktestEngine(bt_config_obj)
-            result = engine.run(price_data, signals)
+            result = engine.run(price_data, signals, setup_scores)
             metrics = result.get_metrics()
 
             # Compute directional accuracy per ticker
@@ -422,6 +454,8 @@ def backtest(bt_config, sig_config, wl_config, grid_search, output_dir):
                 metrics.directional_accuracy_pct = round(sum(dir_acc_values) / len(dir_acc_values), 2)
 
             console.print(metrics)
+            if result.exit_reasons:
+                console.print(f"[dim]Exit reasons: {result.exit_reasons}[/dim]")
 
             if bt_cfg.get("save_equity_curve", True):
                 eq_path = output_path / f"equity_curve_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
@@ -430,6 +464,33 @@ def backtest(bt_config, sig_config, wl_config, grid_search, output_dir):
         except ImportError as e:
             console.print(f"[red]vectorbt not available: {e}[/red]")
             console.print("[dim]Install with: uv add vectorbt[/dim]")
+
+
+def _bar_check(win_rate: float, trades: int) -> str:
+    """Ty's bar for going past paper: 60-70%+ of trades in profit."""
+    if trades == 0:
+        return "n/a"
+    if win_rate >= 70:
+        return "✅ ≥70%"
+    if win_rate >= 60:
+        return "🟡 60-70%"
+    return "❌ <60%"
+
+
+def _print_exit_comparison(rows: list) -> None:
+    table = Table(title="Exit rules: before vs after", box=box.ROUNDED)
+    for col in ["Exits", "Trades", "Win Rate", "Bar", "Avg Loss", "Worst Trade", "Max DD", "Return"]:
+        table.add_column(col, justify="left" if col == "Exits" else "right")
+    for label, m, reasons in rows:
+        table.add_row(
+            label, str(m.total_trades), f"{m.win_rate_pct:.1f}%", _bar_check(m.win_rate_pct, m.total_trades),
+            f"{m.avg_loss_pct:+.2f}%", f"{m.worst_trade_pct:+.2f}%",
+            f"{m.max_drawdown_pct:.2f}%", f"{m.total_return_pct:+.2f}%",
+        )
+    console.print(table)
+    for label, _m, reasons in rows:
+        if reasons:
+            console.print(f"[dim]{label} exit reasons: {reasons}[/dim]")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -958,7 +1019,8 @@ def weekend_monitor(ws_config, once, poll_minutes):
 @click.option("--config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config")
 @click.option("--tickers", default=None, help="Comma-separated ticker override (default: core + N from screener, per config)")
 @click.option("--months", default=None, type=int, help="Lookback months override (default: from config)")
-def weekend_backtest(ws_config, tickers, months):
+@click.option("--compare-exits", is_flag=True, help="Run without and with the 10%/20% loss cap side by side")
+def weekend_backtest(ws_config, tickers, months, compare_exits):
     """
     Weekend Swing Signals — backtest all 3 strategies against cached
     historical data.
@@ -1014,6 +1076,34 @@ def weekend_backtest(ws_config, tickers, months):
     bar_store = IntradayBarStore(alpaca)
     backtester = WeekendSwingBacktester(ws_cfg, bar_store, finnhub)
 
+    if compare_exits:
+        from signal_engine.risk.loss_cap import LossCapRule
+
+        rule = backtester.loss_cap or LossCapRule()
+        table = Table(title="Weekend Swing: exits before vs after", box=box.ROUNDED)
+        for col in ["Strategy", "Exits", "Trades", "Win Rate", "Bar", "Avg Loss", "Worst Trade", "Max DD", "Cap exits"]:
+            table.add_column(col, justify="left" if col in ("Strategy", "Exits") else "right")
+        for exits_label, cap in [("old", None), ("loss cap", rule)]:
+            backtester.loss_cap = cap
+            with console.status(f"[bold green]Backtesting all strategies ({exits_label} exits)..."):
+                s1 = backtester.run_strategy_1(ticker_list, start, end)
+                s2 = backtester.run_strategy_2(ticker_list, start, end)
+                s3_go, s3_fail = backtester.run_strategy_3(ticker_list, start, end)
+            for label, m in [
+                ("1: Prior-Week Breakout", s1), ("2: Overnight Range Breakout", s2),
+                ("3: Gap-and-Go (SPY/QQQ)", s3_go), ("3: Gap-and-Fail (SPY/QQQ)", s3_fail),
+            ]:
+                has = m.trade_count > 0
+                table.add_row(
+                    label, exits_label, str(m.trade_count),
+                    f"{m.win_rate_pct:.1f}%" if has else "n/a", _bar_check(m.win_rate_pct, m.trade_count),
+                    f"{m.avg_loss_pct:.2f}%" if has else "n/a", f"{m.worst_trade_pct:.2f}%" if has else "n/a",
+                    f"{m.max_drawdown_pct:.2f}%" if has else "n/a", str(m.loss_cap_exits),
+                )
+        console.print(table)
+        console.print("[dim]Paper trading only — no live funds involved. Output only, nothing submitted.[/dim]\n")
+        return
+
     with console.status("[bold green]Backtesting Strategy 1 (Prior-Week Breakout Continuation)..."):
         s1_metrics = backtester.run_strategy_1(ticker_list, start, end)
     with console.status("[bold green]Backtesting Strategy 2 (Overnight Range Breakout)..."):
@@ -1027,6 +1117,7 @@ def weekend_backtest(ws_config, tickers, months):
     table.add_column("Win Rate", justify="right")
     table.add_column("Avg Win", justify="right")
     table.add_column("Avg Loss", justify="right")
+    table.add_column("Worst Trade", justify="right")
     table.add_column("Max DD", justify="right")
 
     for label, m in [
@@ -1040,6 +1131,7 @@ def weekend_backtest(ws_config, tickers, months):
             f"{m.win_rate_pct:.1f}%" if m.trade_count else "n/a",
             f"+{m.avg_win_pct:.2f}%" if m.trade_count else "n/a",
             f"{m.avg_loss_pct:.2f}%" if m.trade_count else "n/a",
+            f"{m.worst_trade_pct:.2f}%" if m.trade_count else "n/a",
             f"{m.max_drawdown_pct:.2f}%" if m.trade_count else "n/a",
         )
 
