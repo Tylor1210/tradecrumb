@@ -10,9 +10,12 @@ The output clearly shows ✅ or ❌ against this bar.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 import pandas as pd
 import numpy as np
+
+from signal_engine.backtest.account import AccountStats
 
 
 @dataclass
@@ -24,15 +27,16 @@ class BacktestMetrics:
     Even +0.01% profit = a winning trade.
     """
 
-    total_return_pct: float         # total portfolio return %
+    total_return_pct: float         # account total return % (backtest/account.py)
     win_rate_pct: float             # profitable trades / total trades * 100
     total_trades: int
     winning_trades: int
-    max_drawdown_pct: float         # worst peak-to-trough on equity curve
-    sharpe_ratio: float             # annualized Sharpe
+    max_drawdown_pct: float         # worst peak-to-trough on the account equity curve
+    sharpe_ratio: float             # annualized Sharpe of the account
     directional_accuracy_pct: float # % signals where price moved in predicted direction
     avg_loss_pct: float = 0.0       # mean return of losing trades (negative)
     worst_trade_pct: float = 0.0    # single worst trade return (negative)
+    account: Optional[AccountStats] = None  # one shared account: CAGR, weekly/monthly stats
 
     WIN_RATE_TARGET = 70.0          # class constant: the 70% bar
 
@@ -58,6 +62,7 @@ class BacktestMetrics:
             "avg_loss_pct": self.avg_loss_pct,
             "worst_trade_pct": self.worst_trade_pct,
             "meets_70pct_target": self.meets_win_rate_target,
+            "account": self.account.to_dict() if self.account else None,
         }
 
     def __str__(self) -> str:
@@ -68,7 +73,7 @@ class BacktestMetrics:
             f"\n{'═' * 52}\n"
             f"  BACKTEST RESULTS\n"
             f"{'═' * 52}\n"
-            f"  Total Return:        {self.total_return_pct:+.2f}%\n"
+            f"  Total Return:        {self.total_return_pct:+.2f}%  (one shared account)\n"
             f"  Win Rate:            {self.win_rate_pct:.1f}%  {target_icon}  (target: ≥{self.WIN_RATE_TARGET:.0f}%)\n"
             f"  Total Trades:        {self.total_trades}\n"
             f"  Winning Trades:      {self.winning_trades}\n"

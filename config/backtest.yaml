@@ -42,12 +42,29 @@ loss_cap:
   replaces_fixed_stop: true
   setup_score_floor: 0.0
 
+# Market trend filter. When on, no new longs open on days the index closes
+# below its sma_days simple average (open trades keep their normal exits).
+# Optional: also require the ticker itself above its own sma_days average.
+# Off by default until the comparison earns it a place:
+#   uv run signal-engine backtest --compare-trend-filter
+trend_filter:
+  enabled: false
+  index_symbol: SPY
+  sma_days: 200
+  require_ticker_above_sma: false
+
 # ─────────────────────────────────────────────────
 # PORTFOLIO SETTINGS
 # ─────────────────────────────────────────────────
+# Account sizing for Return, Max DD, CAGR and the weekly/monthly stats.
+# All tickers share one cash balance. Each new trade gets position_size_pct of
+# current account equity (cash + open positions at that day's close), never
+# more than free cash. Once max_positions trades are open, new signals are
+# skipped until one closes. 10% x 10 positions = fully invested at most, no
+# leverage. Win rate / avg loss / worst trade still count every signal.
 initial_capital: 100000.0  # paper portfolio starting value ($)
-position_size_pct: 5.0     # % of portfolio allocated per signal trade
-max_positions: 10          # max concurrent positions
+position_size_pct: 10.0    # % of current account equity per new trade
+max_positions: 10          # most trades open at once
 
 # ─────────────────────────────────────────────────
 # WIN RATE TARGET

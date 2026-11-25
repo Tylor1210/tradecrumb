@@ -284,8 +284,10 @@ def scan(date, signals_config, watchlist_config, top):
 @click.option("--watchlist", "wl_config", default="watchlist.yaml", help="Watchlist file")
 @click.option("--grid-search", is_flag=True, help="Run full weight grid search")
 @click.option("--compare-exits", is_flag=True, help="Run old exits vs the 10%/20% loss cap side by side")
+@click.option("--compare-trend-filter", is_flag=True,
+              help="Run without and with the market trend filter (no new longs while SPY is below its 200-day average)")
 @click.option("--output-dir", default="reports", help="Output directory for results")
-def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, output_dir):
+def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, compare_trend_filter, output_dir):
     """Run backtest against historical data. Use --grid-search to sweep weight combos."""
     from signal_engine.data.alpaca_client import AlpacaDataClient
     from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
@@ -317,8 +319,18 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
         f"{len(symbols)} tickers"
     )
 
+    from signal_engine.risk.trend_filter import TrendFilterRule
+
+    trend_cfg = bt_cfg.get("trend_filter") or {}
+    trend_rule = TrendFilterRule.from_config(trend_cfg)
+    trend_rule_for_compare = trend_rule or TrendFilterRule.with_defaults(trend_cfg)
+    index_symbol = trend_rule_for_compare.index_symbol
+    fetch_symbols = list(symbols)
+    if (trend_rule is not None or compare_trend_filter) and index_symbol not in fetch_symbols:
+        fetch_symbols.append(index_symbol)
+
     with console.status("[bold green]Fetching historical price data..."):
-        price_data = alpaca.get_historical_bars(symbols, start_dt, end_dt)
+        price_data = alpaca.get_historical_bars(fetch_symbols, start_dt, end_dt)
 
     console.print(f"[dim]✓ Price data loaded for {len(price_data)} tickers[/dim]\n")
 
@@ -402,6 +414,8 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
         signals: dict = {}
         setup_scores: dict = {}  # per-bar technical score, used by the loss cap
         for ticker, df in price_data.items():
+            if ticker not in symbols:
+                continue  # loaded only for the trend filter, not traded
             sig_dates = []
             sig_vals = []
             score_vals = []
@@ -423,10 +437,32 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 stop_loss_pct=bt_cfg.get("stop_loss_pct", 5.0),
                 take_profit_pct=bt_cfg.get("take_profit_pct", 10.0),
                 initial_capital=bt_cfg.get("initial_capital", 100000.0),
-                position_size_pct=bt_cfg.get("position_size_pct", 5.0),
+                position_size_pct=bt_cfg.get("position_size_pct", 10.0),
+                max_positions=int(bt_cfg.get("max_positions", 10)),
                 loss_cap=rule,
                 setup_score_floor=float(loss_cap_cfg.get("setup_score_floor", 0.0)),
             )
+
+        from signal_engine.risk.trend_filter import apply_trend_filter
+
+        if compare_trend_filter:
+            rows = []
+            base_signals = signals
+            filtered, removed = apply_trend_filter(signals, price_data, trend_rule_for_compare)
+            console.print(
+                f"Trend filter: {trend_rule_for_compare.describe()}. "
+                f"It removed {removed} of {sum(int(v.sum()) for v in base_signals.values())} buy signals.\n"
+            )
+            for label, sigs in [("No trend filter", base_signals), ("Trend filter", filtered)]:
+                res = BacktestEngine(_make_config(loss_cap_rule)).run(price_data, sigs, setup_scores)
+                rows.append((label, res.get_metrics(), res.exit_reasons))
+            _print_exit_comparison(rows, title="Trend filter: before vs after")
+            _print_account_comparison(rows, _benchmark(price_data, bt_cfg))
+            return
+
+        if trend_rule is not None:
+            signals, removed = apply_trend_filter(signals, price_data, trend_rule)
+            console.print(f"[dim]Trend filter on ({trend_rule.describe()}): removed {removed} buy signals[/dim]")
 
         if compare_exits:
             rule_for_compare = loss_cap_rule or LossCapRule()
@@ -435,6 +471,7 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 res = BacktestEngine(_make_config(rule)).run(price_data, signals, setup_scores)
                 rows.append((label, res.get_metrics(), res.exit_reasons))
             _print_exit_comparison(rows)
+            _print_account_comparison(rows, _benchmark(price_data, bt_cfg))
             return
 
         bt_config_obj = _make_config(loss_cap_rule)
@@ -453,7 +490,8 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
             if dir_acc_values:
                 metrics.directional_accuracy_pct = round(sum(dir_acc_values) / len(dir_acc_values), 2)
 
-            console.print(metrics)
+            console.print(str(metrics))  # rich would pretty-print the dataclass fields instead
+            _print_account_comparison([("This run", metrics, None)], _benchmark(price_data, bt_cfg))
             if result.exit_reasons:
                 console.print(f"[dim]Exit reasons: {result.exit_reasons}[/dim]")
 
@@ -477,10 +515,51 @@ def _bar_check(win_rate: float, trades: int) -> str:
     return "❌ <60%"
 
 
-def _print_exit_comparison(rows: list) -> None:
-    table = Table(title="Exit rules: before vs after", box=box.ROUNDED)
-    for col in ["Exits", "Trades", "Win Rate", "Bar", "Avg Loss", "Worst Trade", "Max DD", "Return"]:
-        table.add_column(col, justify="left" if col == "Exits" else "right")
+def _benchmark(price_data: dict, bt_cfg: dict):
+    """Buy and hold SPY over the same dates, as a yardstick. None if SPY wasn't loaded."""
+    from signal_engine.backtest.account import buy_and_hold_stats
+
+    spy = price_data.get("SPY")
+    if spy is None or "close" not in spy:
+        return None
+    return buy_and_hold_stats(spy["close"], float(bt_cfg.get("initial_capital", 100000.0)))
+
+
+def _print_account_comparison(rows: list, benchmark=None) -> None:
+    """One shared account per row: does it grow steadily week to week and month to month?"""
+    table = Table(title="Account growth (one shared account)", box=box.ROUNDED)
+    for col in ["Run", "Return", "CAGR", "Max DD", "Sharpe", "Avg Week", "Weeks Up/Down",
+                "Worst Week", "Avg Month", "Months Up/Down", "Worst Month"]:
+        table.add_column(col, justify="left" if col == "Run" else "right")
+
+    def _row(label, a):
+        w, m = a.weekly, a.monthly
+        table.add_row(
+            label, f"{a.total_return_pct:+.1f}%", f"{a.cagr_pct:+.1f}%", f"{a.max_drawdown_pct:.1f}%",
+            f"{a.sharpe_ratio:.2f}", f"{w.avg_pct:+.2f}%", f"{w.positive_pct:.0f}/{w.negative_pct:.0f}%", f"{w.worst_pct:+.1f}%",
+            f"{m.avg_pct:+.2f}%", f"{m.positive_pct:.0f}/{m.negative_pct:.0f}%", f"{m.worst_pct:+.1f}%",
+        )
+
+    for label, m, _reasons in rows:
+        if m.account is not None:
+            _row(label, m.account)
+    if benchmark is not None:
+        _row("Buy and hold SPY", benchmark)
+    console.print(table)
+    console.print("[dim]Weeks/Months Up/Down: share that ended up and down; the rest were flat (all cash).[/dim]")
+    for label, m, _reasons in rows:
+        a = m.account
+        if a is not None:
+            console.print(
+                f"[dim]{label}: took {a.trades_taken} trades ({a.trades_skipped} skipped with positions full), "
+                f"{a.win_rate_pct:.1f}% of taken trades won, {a.avg_invested_pct:.0f}% of equity invested on average[/dim]"
+            )
+
+
+def _print_exit_comparison(rows: list, title: str = "Exit rules: before vs after") -> None:
+    table = Table(title=title, box=box.ROUNDED)
+    for col in ["Run", "Trades", "Win Rate", "Bar", "Avg Loss", "Worst Trade", "Max DD", "Return"]:
+        table.add_column(col, justify="left" if col == "Run" else "right")
     for label, m, reasons in rows:
         table.add_row(
             label, str(m.total_trades), f"{m.win_rate_pct:.1f}%", _bar_check(m.win_rate_pct, m.total_trades),
