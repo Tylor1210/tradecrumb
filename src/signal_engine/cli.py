@@ -284,8 +284,9 @@ def scan(date, signals_config, watchlist_config, top):
 @click.option("--watchlist", "wl_config", default="watchlist.yaml", help="Watchlist file")
 @click.option("--grid-search", is_flag=True, help="Run full weight grid search")
 @click.option("--compare-exits", is_flag=True, help="Run old exits vs the 10%/20% loss cap side by side")
+@click.option("--compare-scale-out", is_flag=True, help="Run current exits vs selling half at +20% side by side")
 @click.option("--output-dir", default="reports", help="Output directory for results")
-def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, output_dir):
+def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, compare_scale_out, output_dir):
     """Run backtest against historical data. Use --grid-search to sweep weight combos."""
     from signal_engine.data.alpaca_client import AlpacaDataClient
     from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
@@ -379,9 +380,12 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
         from signal_engine.backtest.engine import BacktestConfig, BacktestEngine
 
         from signal_engine.risk.loss_cap import LossCapRule
+        from signal_engine.risk.scale_out import ScaleOutRule
 
         loss_cap_cfg = bt_cfg.get("loss_cap") or {}
         loss_cap_rule = LossCapRule.from_config(loss_cap_cfg)
+        scale_out_cfg = bt_cfg.get("scale_out") or {}
+        scale_out_rule = ScaleOutRule.from_config(scale_out_cfg)
 
         console.print(f"Hold period: {bt_cfg.get('hold_period_days', 5)} days")
         console.print(f"Stop loss: {bt_cfg.get('stop_loss_pct', 5.0)}% | Take profit: {bt_cfg.get('take_profit_pct', 10.0)}%")
@@ -392,6 +396,8 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 f"backstop {loss_cap_rule.backstop_loss_pct:g}%"
                 + (" — replaces the flat stop" if loss_cap_rule.replaces_fixed_stop else "")
             )
+        if scale_out_rule is not None:
+            console.print(f"Scale-out: {scale_out_rule.describe()}")
         console.print()
 
         tech_analyzer = TechnicalAnalyzer(sig_cfg.get("technical", {}))
@@ -415,7 +421,7 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 signals[ticker] = pd.Series(sig_vals, index=sig_dates)
                 setup_scores[ticker] = pd.Series(score_vals, index=sig_dates)
 
-        def _make_config(rule):
+        def _make_config(rule, so_rule=None):
             return BacktestConfig(
                 start_date=bt_cfg["start_date"],
                 end_date=bt_cfg["end_date"],
@@ -426,7 +432,27 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
                 position_size_pct=bt_cfg.get("position_size_pct", 5.0),
                 loss_cap=rule,
                 setup_score_floor=float(loss_cap_cfg.get("setup_score_floor", 0.0)),
+                scale_out=so_rule,
+                continuation_score_floor=float(scale_out_cfg.get("continuation_score_floor", 0.0)),
             )
+
+        if compare_scale_out:
+            so_for_compare = scale_out_rule or ScaleOutRule.from_config_values(scale_out_cfg)
+            console.print(f"[dim]Scale-out: {so_for_compare.describe()}[/dim]\n")
+            rows = []
+            so_stats = None
+            for label, so in [("Current exits", None), (f"Sell {so_for_compare.sell_fraction:.0%} at +{so_for_compare.trigger_gain_pct:g}%", so_for_compare)]:
+                res = BacktestEngine(_make_config(loss_cap_rule, so)).run(price_data, signals, setup_scores)
+                rows.append((label, res.get_metrics(), res.exit_reasons))
+                if so is not None:
+                    so_stats = res.scale_out_stats
+            _print_exit_comparison(rows, title="Exit rules: current vs scale-out")
+            if so_stats is not None:
+                _print_scale_out_reach(
+                    so_stats, so_for_compare.trigger_gain_pct,
+                    switches_off_tp=so_for_compare.replaces_take_profit,
+                )
+            return
 
         if compare_exits:
             rule_for_compare = loss_cap_rule or LossCapRule()
@@ -437,7 +463,7 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
             _print_exit_comparison(rows)
             return
 
-        bt_config_obj = _make_config(loss_cap_rule)
+        bt_config_obj = _make_config(loss_cap_rule, scale_out_rule)
 
         try:
             engine = BacktestEngine(bt_config_obj)
@@ -456,6 +482,11 @@ def backtest(bt_config, sig_config, wl_config, grid_search, compare_exits, outpu
             console.print(metrics)
             if result.exit_reasons:
                 console.print(f"[dim]Exit reasons: {result.exit_reasons}[/dim]")
+            if result.scale_out_stats is not None:
+                _print_scale_out_reach(
+                    result.scale_out_stats, scale_out_rule.trigger_gain_pct,
+                    switches_off_tp=scale_out_rule.replaces_take_profit,
+                )
 
             if bt_cfg.get("save_equity_curve", True):
                 eq_path = output_path / f"equity_curve_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
@@ -477,20 +508,50 @@ def _bar_check(win_rate: float, trades: int) -> str:
     return "❌ <60%"
 
 
-def _print_exit_comparison(rows: list) -> None:
-    table = Table(title="Exit rules: before vs after", box=box.ROUNDED)
-    for col in ["Exits", "Trades", "Win Rate", "Bar", "Avg Loss", "Worst Trade", "Max DD", "Return"]:
+def _print_exit_comparison(rows: list, title: str = "Exit rules: before vs after") -> None:
+    table = Table(title=title, box=box.ROUNDED)
+    for col in ["Exits", "Trades", "Win Rate", "Bar", "Avg Trade", "Avg Loss", "Worst Trade", "Max DD", "Return"]:
         table.add_column(col, justify="left" if col == "Exits" else "right")
     for label, m, reasons in rows:
         table.add_row(
             label, str(m.total_trades), f"{m.win_rate_pct:.1f}%", _bar_check(m.win_rate_pct, m.total_trades),
-            f"{m.avg_loss_pct:+.2f}%", f"{m.worst_trade_pct:+.2f}%",
+            f"{m.avg_trade_pct:+.2f}%", f"{m.avg_loss_pct:+.2f}%", f"{m.worst_trade_pct:+.2f}%",
             f"{m.max_drawdown_pct:.2f}%", f"{m.total_return_pct:+.2f}%",
         )
     console.print(table)
     for label, _m, reasons in rows:
         if reasons:
             console.print(f"[dim]{label} exit reasons: {reasons}[/dim]")
+
+
+def _print_scale_out_reach(stats, trigger_pct: float, label: str = "", switches_off_tp: bool = False) -> None:
+    """How many trades ever got to the scale-out trigger, and what the rule did with them."""
+    prefix = f"{label}: " if label else ""
+    if stats.trades == 0:
+        console.print(f"[dim]{prefix}no trades[/dim]")
+        return
+    steps = sorted({5.0, 10.0, float(trigger_pct)})
+    ladder = ", ".join(
+        f"+{g:g}% {stats.reached_at_least(g)} ({stats.reached_at_least(g) / stats.trades * 100:.1f}%)"
+        for g in steps
+    )
+    console.print(
+        f"{prefix}{stats.reached_trigger} of {stats.trades} trades ({stats.reached_pct:.1f}%) closed at "
+        f"+{trigger_pct:g}% or better while open. Scaled out {stats.scaled_out}, kept full on a fast move "
+        f"{stats.fast_move_held}, closed all with no continuation {stats.closed_no_runner}."
+    )
+    console.print(f"[dim]{prefix}best close reached: {ladder}[/dim]")
+    if stats.reached_trigger == 0:
+        console.print(
+            f"[yellow]{prefix}no trade got to +{trigger_pct:g}%, so the scale-out rule never ran."
+            + (" Any difference above comes from the take profit it switches off.[/yellow]"
+               if switches_off_tp else "[/yellow]")
+        )
+    elif stats.reached_pct < 5:
+        console.print(
+            f"[yellow]{prefix}under 5% of trades got to +{trigger_pct:g}%, so this rule only touches a "
+            "handful of trades.[/yellow]"
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1021,7 +1082,8 @@ def weekend_monitor(ws_config, once, poll_minutes):
 @click.option("--tickers", default=None, help="Comma-separated ticker override (default: core + N from screener, per config)")
 @click.option("--months", default=None, type=int, help="Lookback months override (default: from config)")
 @click.option("--compare-exits", is_flag=True, help="Run without and with the 10%/20% loss cap side by side")
-def weekend_backtest(ws_config, tickers, months, compare_exits):
+@click.option("--compare-scale-out", is_flag=True, help="Run current exits vs selling half at +20% side by side")
+def weekend_backtest(ws_config, tickers, months, compare_exits, compare_scale_out):
     """
     Weekend Swing Signals — backtest all 3 strategies against cached
     historical data.
@@ -1076,6 +1138,46 @@ def weekend_backtest(ws_config, tickers, months, compare_exits):
 
     bar_store = IntradayBarStore(alpaca)
     backtester = WeekendSwingBacktester(ws_cfg, bar_store, finnhub)
+
+    if compare_scale_out:
+        from signal_engine.risk.scale_out import ScaleOutRule
+        from signal_engine.weekend_swing.backtest import _compute_metrics, scale_out_stats
+
+        so_rule = backtester.scale_out or ScaleOutRule.from_config_values(ws_cfg.get("scale_out"))
+        console.print(f"[dim]Scale-out: {so_rule.describe()}. Friday close still ends every trade.[/dim]\n")
+        table = Table(title="Weekend Swing: current exits vs scale-out", box=box.ROUNDED)
+        for col in ["Strategy", "Exits", "Trades", "Win Rate", "Bar", "Avg Win", "Avg Loss", "Worst Trade", "Max DD", "Sum of Returns"]:
+            table.add_column(col, justify="left" if col in ("Strategy", "Exits") else "right")
+        reach = []
+        so_label = f"sell {so_rule.sell_fraction:.0%} at +{so_rule.trigger_gain_pct:g}%"
+        for exits_label, so in [("current", None), (so_label, so_rule)]:
+            backtester.scale_out = so
+            with console.status(f"[bold green]Backtesting all strategies ({exits_label} exits)..."):
+                s1 = backtester.collect_strategy_1_trades(ticker_list, start, end)
+                s2 = backtester.collect_strategy_2_trades(ticker_list, start, end)
+                s3_go, s3_fail = backtester.collect_strategy_3_trades(ticker_list, start, end)
+            for label, trades, name, gap in [
+                ("1: Prior-Week Breakout", s1, "prior_week_breakout", None),
+                ("2: Overnight Range Breakout", s2, "overnight_range_breakout", None),
+                ("3: Gap-and-Go (SPY/QQQ)", s3_go, "gap_strength", "gap_and_go"),
+                ("3: Gap-and-Fail (SPY/QQQ)", s3_fail, "gap_strength", "gap_and_fail"),
+            ]:
+                m = _compute_metrics(trades, name, gap_type=gap)
+                has = m.trade_count > 0
+                table.add_row(
+                    label, exits_label, str(m.trade_count),
+                    f"{m.win_rate_pct:.1f}%" if has else "n/a", _bar_check(m.win_rate_pct, m.trade_count),
+                    f"+{m.avg_win_pct:.2f}%" if has else "n/a", f"{m.avg_loss_pct:.2f}%" if has else "n/a",
+                    f"{m.worst_trade_pct:.2f}%" if has else "n/a", f"{m.max_drawdown_pct:.2f}%" if has else "n/a",
+                    f"{m.total_return_pct:+.2f}%" if has else "n/a",
+                )
+                if so is not None:
+                    reach.append((label, scale_out_stats(trades)))
+        console.print(table)
+        for label, stats in reach:
+            _print_scale_out_reach(stats, so_rule.trigger_gain_pct, label=label)
+        console.print("[dim]Paper trading only — no live funds involved. Output only, nothing submitted.[/dim]\n")
+        return
 
     if compare_exits:
         from signal_engine.risk.loss_cap import LossCapRule

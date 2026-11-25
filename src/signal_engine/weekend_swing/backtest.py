@@ -25,6 +25,13 @@ import pandas as pd
 import vectorbt as vbt  # noqa: F401 (registers the .vbt accessor)
 
 from signal_engine.risk.loss_cap import LossCapRule, loss_pct_from_entry
+from signal_engine.risk.scale_out import (
+    ScaleOutRule,
+    ScaleOutStats,
+    atr_series,
+    bar_move_in_atr,
+    gain_pct_from_entry,
+)
 from signal_engine.weekend_swing.earnings import get_earnings_exclusions
 from signal_engine.weekend_swing.levels import (
     bar_dates,
@@ -45,12 +52,19 @@ class WeekendSwingTrade:
     entry_price: float
     stop_price: float
     exit_time: object
-    exit_price: float
-    exit_reason: str  # "stopped_out" | "friday_close" | "loss_cap_*" (see risk/loss_cap.py)
-    return_pct: float
+    exit_price: float  # blended average exit price when part of the trade was sold earlier
+    exit_reason: str  # "stopped_out" | "friday_close" | "loss_cap_*" | "scale_out_*" (see risk/)
+    return_pct: float  # whole-trade return; a partial sale is weighted by the fraction sold
     gap_type: Optional[str] = None  # strategy 3 only
     breakdown: dict = field(default_factory=dict)  # the triggering signal's breakdown (volume ratio, ATR, etc.)
     regime: Optional[dict] = None  # MarketRegime.to_dict() as of the trade's Monday (None if no provider set)
+    # Scale-out details (None/0 when the trade was never partly sold)
+    partial_exit_price: Optional[float] = None
+    partial_exit_time: object = None
+    partial_fraction: float = 0.0
+    max_gain_pct: Optional[float] = None  # best close-to-entry gain seen while the trade was open
+    reached_scale_out: bool = False       # closed at or above the scale-out trigger at least once
+    scale_out_fast_move: bool = False     # trigger reached on a fast move (full position kept)
 
 
 @dataclass
@@ -64,6 +78,9 @@ class WeekendSwingBacktestMetrics:
     gap_type: Optional[str] = None  # set only for strategy 3's split reporting
     worst_trade_pct: float = 0.0    # single worst trade return (negative)
     loss_cap_exits: int = 0         # trades closed by the 10%/20% loss cap
+    total_return_pct: float = 0.0   # sum of per-trade returns (each trade = one equal-size position)
+    reached_scale_out: int = 0      # trades that closed at or above the scale-out trigger at least once
+    scaled_out: int = 0             # trades where part was sold at the trigger and a runner kept
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +91,9 @@ class WeekendSwingBacktestMetrics:
             "avg_loss_pct": self.avg_loss_pct,
             "worst_trade_pct": self.worst_trade_pct,
             "loss_cap_exits": self.loss_cap_exits,
+            "total_return_pct": self.total_return_pct,
+            "reached_scale_out": self.reached_scale_out,
+            "scaled_out": self.scaled_out,
             "max_drawdown_pct": self.max_drawdown_pct,
             "trade_count": self.trade_count,
         }
@@ -111,7 +131,42 @@ def _compute_metrics(
         gap_type=gap_type,
         worst_trade_pct=round(min(returns_pct), 2),
         loss_cap_exits=sum(1 for t in trades if t.exit_reason.startswith("loss_cap")),
+        total_return_pct=round(sum(returns_pct), 2),
+        reached_scale_out=sum(1 for t in trades if t.reached_scale_out),
+        scaled_out=sum(1 for t in trades if t.partial_fraction > 0),
     )
+
+
+def scale_out_stats(trades: list) -> ScaleOutStats:
+    """How often trades reached the scale-out trigger, and what the rule did with them."""
+    stats = ScaleOutStats()
+    for t in trades:
+        stats.trades += 1
+        if t.max_gain_pct is not None:
+            stats.max_gain_pcts.append(t.max_gain_pct)
+        if not t.reached_scale_out:
+            continue
+        stats.reached_trigger += 1
+        if t.scale_out_fast_move:
+            stats.fast_move_held += 1
+        elif t.partial_fraction > 0:
+            stats.scaled_out += 1
+        else:
+            stats.closed_no_runner += 1
+    return stats
+
+
+@dataclass
+class ExitResult:
+    exit_price: float        # blended average exit price (equals the single exit price when nothing was sold early)
+    exit_reason: str
+    exit_time: object
+    partial_price: Optional[float] = None
+    partial_time: object = None
+    partial_fraction: float = 0.0
+    max_gain_pct: Optional[float] = None
+    reached_scale_out: bool = False
+    fast_move: bool = False
 
 
 def _simulate_exit(
@@ -124,11 +179,14 @@ def _simulate_exit(
     week_start: pd.Timestamp,
     week_end: pd.Timestamp,
     loss_cap: Optional[LossCapRule] = None,
+    scale_out: Optional[ScaleOutRule] = None,
 ) -> tuple:
     """
     Walks forward from entry: checks the rest of the entry day's intraday
     bars for a stop touch, then daily bars through week_end (Friday).
-    Returns (exit_price, exit_reason, exit_time).
+    Returns (exit_price, exit_reason, exit_time). When part of the trade was
+    sold early by the scale-out rule, exit_price is the blended average, so
+    the trade's return is the fraction-weighted return of both sales.
 
     When `loss_cap` is set it runs on each daily close after the stop check
     (it never loosens the strategy's own stop). "Setup still shows a chance
@@ -136,35 +194,110 @@ def _simulate_exit(
     above its open for a long (below its open for a short). With today's tight
     ATR-based stops the stop almost always fires long before a 10% loss, so
     in practice the cap only matters if stops are widened or removed.
+
+    When `scale_out` is set it also runs on each daily close, with the same
+    "buyers stepped in" test standing for "setup points to continuation".
+    The Friday close still ends every trade, runner included.
     """
+    r = _simulate_exit_detail(
+        direction, entry_price, stop_price, entry_time, entry_day_intraday_df,
+        daily_df, week_start, week_end, loss_cap=loss_cap, scale_out=scale_out,
+    )
+    return r.exit_price, r.exit_reason, r.exit_time
+
+
+def _simulate_exit_detail(
+    direction: str,
+    entry_price: float,
+    stop_price: float,
+    entry_time,
+    entry_day_intraday_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    week_start: pd.Timestamp,
+    week_end: pd.Timestamp,
+    loss_cap: Optional[LossCapRule] = None,
+    scale_out: Optional[ScaleOutRule] = None,
+) -> ExitResult:
+    """Same walk as _simulate_exit(), returning the partial-sale details too."""
+    so_state = scale_out.new_trade() if scale_out is not None else None
+    partial_price, partial_time, partial_fraction = None, None, 0.0
+
+    def done(price, reason, when) -> ExitResult:
+        blended = price
+        if partial_price is not None:
+            blended = partial_fraction * partial_price + (1 - partial_fraction) * price
+        return ExitResult(
+            exit_price=blended, exit_reason=reason, exit_time=when,
+            partial_price=partial_price, partial_time=partial_time, partial_fraction=partial_fraction,
+            max_gain_pct=(so_state.max_gain_pct if so_state is not None and so_state.bars else None),
+            reached_scale_out=bool(so_state and so_state.reached_trigger),
+            fast_move=bool(so_state and so_state.fast_move),
+        )
+
     remaining_today = entry_day_intraday_df.loc[entry_day_intraday_df.index > entry_time]
     for idx, row in remaining_today.iterrows():
         if direction == "long" and float(row["low"]) <= stop_price:
-            return stop_price, "stopped_out", idx
+            return done(stop_price, "stopped_out", idx)
         if direction == "short" and float(row["high"]) >= stop_price:
-            return stop_price, "stopped_out", idx
+            return done(stop_price, "stopped_out", idx)
 
     # Monday after entry is covered by the intraday walk above. Monday's daily bar is
     # skipped: its low/high includes prices from before the entry.
     dates = bar_dates(daily_df)
-    rest_of_week = daily_df.loc[(dates > calendar_day(week_start)) & (dates <= calendar_day(week_end))]
+    in_week = (dates > calendar_day(week_start)) & (dates <= calendar_day(week_end))
+    rest_of_week = daily_df.loc[in_week]
     exit_price, exit_time = entry_price, entry_time
     cap_state = loss_cap.new_trade() if loss_cap is not None else None
-    for idx, row in rest_of_week.iterrows():
+
+    atr = prev_closes = None
+    if so_state is not None:
+        atr_all = atr_series(daily_df)
+        atr = atr_all.shift(1).loc[in_week] if atr_all is not None else None
+        prev_closes = daily_df["close"].astype(float).shift(1).loc[in_week]
+
+    for pos, (idx, row) in enumerate(rest_of_week.iterrows()):
         if direction == "long" and float(row["low"]) <= stop_price:
-            return stop_price, "stopped_out", idx
+            return done(stop_price, "stopped_out", idx)
         if direction == "short" and float(row["high"]) >= stop_price:
-            return stop_price, "stopped_out", idx
+            return done(stop_price, "stopped_out", idx)
         close = float(row["close"])
+        day_open = float(row["open"])
+        buyers_in = close > day_open if direction == "long" else close < day_open
+
+        if so_state is not None:
+            move_atr = bar_move_in_atr(
+                direction, close,
+                float(prev_closes.iloc[pos]) if prev_closes is not None else None,
+                float(atr.iloc[pos]) if atr is not None else None,
+            )
+            was_managing = so_state.managing
+            action = so_state.update(gain_pct_from_entry(direction, entry_price, close), buyers_in, move_atr)
+            if action is not None:
+                if action.closes_position:
+                    return done(close, action.reason, idx)
+                partial_price, partial_time, partial_fraction = close, idx, action.sell_fraction
+            if was_managing or so_state.managing:
+                exit_price, exit_time = close, idx
+                continue  # the scale-out rule owns this trade's exit now
+
         if cap_state is not None:
-            day_open = float(row["open"])
-            buyers_in = close > day_open if direction == "long" else close < day_open
             reason = cap_state.update(loss_pct_from_entry(direction, entry_price, close), buyers_in)
             if reason is not None:
-                return close, reason, idx
+                return done(close, reason, idx)
         exit_price, exit_time = close, idx
 
-    return exit_price, "friday_close", exit_time
+    return done(exit_price, "friday_close", exit_time)
+
+
+def _scale_out_fields(ex: ExitResult) -> dict:
+    return {
+        "partial_exit_price": ex.partial_price,
+        "partial_exit_time": ex.partial_time,
+        "partial_fraction": ex.partial_fraction,
+        "max_gain_pct": ex.max_gain_pct,
+        "reached_scale_out": ex.reached_scale_out,
+        "scale_out_fast_move": ex.fast_move,
+    }
 
 
 def _return_pct(direction: str, entry_price: float, exit_price: float) -> float:
@@ -189,6 +322,7 @@ class WeekendSwingBacktester:
         self.regime_provider = regime_provider
         self._earnings_cache: dict = {}
         self.loss_cap = LossCapRule.from_config(config.get("loss_cap"))
+        self.scale_out = ScaleOutRule.from_config(config.get("scale_out"))
 
     def _regime_for(self, week_start: pd.Timestamp) -> Optional[dict]:
         if self.regime_provider is None:
@@ -239,15 +373,17 @@ class WeekendSwingBacktester:
                 if signal is None:
                     continue
 
-                exit_price, exit_reason, exit_time = _simulate_exit(
+                ex = _simulate_exit_detail(
                     signal.direction, signal.entry_price, signal.stop_price, signal.date,
-                    monday_bars, daily_df, week_start, week_end, loss_cap=self.loss_cap,
+                    monday_bars, daily_df, week_start, week_end,
+                    loss_cap=self.loss_cap, scale_out=self.scale_out,
                 )
                 trades.append(WeekendSwingTrade(
                     ticker=ticker, strategy="prior_week_breakout", direction=signal.direction,
                     entry_time=signal.date, entry_price=signal.entry_price, stop_price=signal.stop_price,
-                    exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
-                    return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
+                    exit_time=ex.exit_time, exit_price=ex.exit_price, exit_reason=ex.exit_reason,
+                    return_pct=round(_return_pct(signal.direction, signal.entry_price, ex.exit_price), 4),
+                    **_scale_out_fields(ex),
                     breakdown=signal.breakdown, regime=self._regime_for(week_start),
                 ))
 
@@ -288,15 +424,17 @@ class WeekendSwingBacktester:
                 if signal is None:
                     continue
 
-                exit_price, exit_reason, exit_time = _simulate_exit(
+                ex = _simulate_exit_detail(
                     signal.direction, signal.entry_price, signal.stop_price, signal.date,
-                    monday_bars, daily_df, week_start, week_end, loss_cap=self.loss_cap,
+                    monday_bars, daily_df, week_start, week_end,
+                    loss_cap=self.loss_cap, scale_out=self.scale_out,
                 )
                 trades.append(WeekendSwingTrade(
                     ticker=ticker, strategy="overnight_range_breakout", direction=signal.direction,
                     entry_time=signal.date, entry_price=signal.entry_price, stop_price=signal.stop_price,
-                    exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
-                    return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
+                    exit_time=ex.exit_time, exit_price=ex.exit_price, exit_reason=ex.exit_reason,
+                    return_pct=round(_return_pct(signal.direction, signal.entry_price, ex.exit_price), 4),
+                    **_scale_out_fields(ex),
                     breakdown=signal.breakdown, regime=self._regime_for(week_start),
                 ))
 
@@ -351,15 +489,17 @@ class WeekendSwingBacktester:
                 if signal is None:
                     continue
 
-                exit_price, exit_reason, exit_time = _simulate_exit(
+                ex = _simulate_exit_detail(
                     signal.direction, signal.entry_price, signal.stop_price, signal.date,
-                    monday_bars, daily_df, week_start, week_end, loss_cap=self.loss_cap,
+                    monday_bars, daily_df, week_start, week_end,
+                    loss_cap=self.loss_cap, scale_out=self.scale_out,
                 )
                 trade = WeekendSwingTrade(
                     ticker=ticker, strategy="gap_strength", direction=signal.direction,
                     entry_time=signal.date, entry_price=signal.entry_price, stop_price=signal.stop_price,
-                    exit_time=exit_time, exit_price=exit_price, exit_reason=exit_reason,
-                    return_pct=round(_return_pct(signal.direction, signal.entry_price, exit_price), 4),
+                    exit_time=ex.exit_time, exit_price=ex.exit_price, exit_reason=ex.exit_reason,
+                    return_pct=round(_return_pct(signal.direction, signal.entry_price, ex.exit_price), 4),
+                    **_scale_out_fields(ex),
                     gap_type=signal.breakdown.get("gap_type"),
                     breakdown=signal.breakdown, regime=self._regime_for(week_start),
                 )

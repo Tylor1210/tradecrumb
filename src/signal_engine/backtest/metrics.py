@@ -33,6 +33,7 @@ class BacktestMetrics:
     directional_accuracy_pct: float # % signals where price moved in predicted direction
     avg_loss_pct: float = 0.0       # mean return of losing trades (negative)
     worst_trade_pct: float = 0.0    # single worst trade return (negative)
+    avg_trade_pct: float = 0.0      # mean return per trade (a partly sold trade counts once, blended)
 
     WIN_RATE_TARGET = 70.0          # class constant: the 70% bar
 
@@ -57,6 +58,7 @@ class BacktestMetrics:
             "directional_accuracy_pct": self.directional_accuracy_pct,
             "avg_loss_pct": self.avg_loss_pct,
             "worst_trade_pct": self.worst_trade_pct,
+            "avg_trade_pct": self.avg_trade_pct,
             "meets_70pct_target": self.meets_win_rate_target,
         }
 

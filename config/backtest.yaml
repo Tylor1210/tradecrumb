@@ -42,6 +42,32 @@ loss_cap:
   replaces_fixed_stop: true
   setup_score_floor: 0.0
 
+# Partial profit taking ("sell half at +20%, let the rest run"). See src/signal_engine/risk/scale_out.py.
+#  - first close at +trigger_gain_pct: sell sell_fraction, keep the rest as a runner
+#    while the setup still points to continuation (technical score >= continuation_score_floor)
+#  - no continuation on that bar: close it all at the gain
+#  - fast move (trigger reached within fast_move_bars closes of entry, or a single bar
+#    over fast_move_atr_mult x ATR14): don't force the sale, keep it all on the trailing stop
+#  - runner / fast position closes on: trail_pct off its best close, a close back at
+#    runner_floor_pct (0 = breakeven), the setup turning (runner only), or runner_max_bars
+# replaces_take_profit: true turns off take_profit_pct above while this is on, since a 10%
+# take profit would always fire before +20%. runner_ignores_time_exit lets the runner
+# outlive hold_period_days (runner_max_bars still caps it).
+# Off by default. Compare against the current exits with:
+#   uv run signal-engine backtest --compare-scale-out
+scale_out:
+  enabled: false
+  trigger_gain_pct: 20.0
+  sell_fraction: 0.5
+  fast_move_bars: 2
+  fast_move_atr_mult: 3.0
+  trail_pct: 8.0
+  runner_floor_pct: 0.0
+  runner_max_bars: 20
+  replaces_take_profit: true
+  runner_ignores_time_exit: true
+  continuation_score_floor: 0.0
+
 # ─────────────────────────────────────────────────
 # PORTFOLIO SETTINGS
 # ─────────────────────────────────────────────────

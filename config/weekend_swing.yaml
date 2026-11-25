@@ -79,6 +79,30 @@ loss_cap:
   backstop_loss_pct: 25.0
 
 # ─────────────────────────────────────────────────────────────
+# PARTIAL PROFIT TAKING (sell half at +20%, let the rest run)
+# ─────────────────────────────────────────────────────────────
+# Runs on daily closes, like the loss cap. First close at +trigger_gain_pct:
+# sell sell_fraction and keep the rest while the day closed above its open
+# (buyers still in; below its open for shorts), otherwise close it all.
+# Fast move (trigger within fast_move_bars closes of entry, or one day over
+# fast_move_atr_mult x ATR14): keep it all on the trailing stop instead.
+# fast_move_bars is 1 here (Tuesday's close), not 2 like the daily backtest,
+# because the week only has four closes after entry.
+# Runner closes on trail_pct off its best close, a close back at
+# runner_floor_pct (0 = breakeven), or the setup turning. The Friday close
+# still ends every trade, runner included, so a +20% move inside one week is
+# rare here. Off by default. Compare with:
+#   uv run signal-engine weekend-backtest --compare-scale-out
+scale_out:
+  enabled: false
+  trigger_gain_pct: 20.0
+  sell_fraction: 0.5
+  fast_move_bars: 1
+  fast_move_atr_mult: 3.0
+  trail_pct: 8.0
+  runner_floor_pct: 0.0
+
+# ─────────────────────────────────────────────────────────────
 # BACKTEST DEFAULTS
 # ─────────────────────────────────────────────────────────────
 backtest:
