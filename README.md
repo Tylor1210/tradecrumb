@@ -232,3 +232,15 @@ The system targets **≥70% win rate** (profitable trades / total trades, where 
 - Equity curve HTML saved to `reports/`
 
 **This tool is for research and paper trading only. No live brokerage connection is implemented.**
+
+## Market regime and the weekly paper cycle
+
+```bash
+uv run signal-engine regime                    # fear/greed (0-100) + buying/selling pressure, with drivers
+uv run signal-engine weekend-regime-study      # backtest tagged by regime; shows what the policy would change
+uv run signal-engine weekly-cycle --phase auto # scan / trigger+submit / stop enforcement / review, by time of week
+uv run signal-engine weekly-cycle --print-cron # crontab lines that run it unattended (Alpaca PAPER only)
+```
+
+Weekly reviews land in `reports/weekly/<monday>.md`. The regime policy (`config/market_regime.yaml`)
+is off until the study shows it helps in both halves of the data.

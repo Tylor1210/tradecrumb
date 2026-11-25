@@ -980,6 +980,59 @@ def api_weekend_history(
 
 
 # ─────────────────────────────────────────────────────────────
+# MARKET REGIME + WEEKLY REVIEW
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/api/regime")
+def api_regime():
+    """Latest saved fear/greed + pressure snapshot and recent history (written by `signal-engine regime` / weekly-cycle)."""
+    from signal_engine.market_regime.store import RegimeStore
+
+    store = RegimeStore()
+    return {"latest": store.latest(), "history": store.history(30)}
+
+
+@app.post("/api/regime/run")
+def api_regime_run():
+    """Compute the regime now from Alpaca daily bars and save it."""
+    import pandas as pd
+    from signal_engine.cli import _cached_universe, _load_config
+    from signal_engine.market_regime.provider import RegimeProvider
+    from signal_engine.market_regime.store import RegimeStore
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+
+    if not has_credentials():
+        raise HTTPException(status_code=400, detail="Alpaca API keys required for the market regime")
+    try:
+        provider = RegimeProvider(
+            _load_config("market_regime.yaml"), IntradayBarStore(AlpacaDataClient()),
+            _cached_universe(get_weekend_swing_config()),
+        )
+        regime = provider.as_of(pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1))
+    except Exception as e:
+        logger.error("Regime run failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    if regime is None:
+        raise HTTPException(status_code=502, detail="No SPY data returned")
+    RegimeStore().save(regime)
+    return {"latest": regime.to_dict()}
+
+
+@app.get("/api/weekend-swing/weekly-review")
+def api_weekly_review(week_start: Optional[str] = Query(None)):
+    """Most recent (or a specific week's) weekly review written by `weekly-cycle --phase review`."""
+    import json
+    from signal_engine.weekend_swing.review import REPORT_DIR
+
+    files = sorted(REPORT_DIR.glob("*.json")) if REPORT_DIR.exists() else []
+    if week_start:
+        files = [f for f in files if f.stem == week_start]
+    if not files:
+        return {"review": None}
+    return {"review": json.loads(files[-1].read_text())}
+
+
+# ─────────────────────────────────────────────────────────────
 # STATIC STATIC ASSETS ROUTING
 # ─────────────────────────────────────────────────────────────
 

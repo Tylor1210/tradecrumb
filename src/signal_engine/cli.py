@@ -1052,6 +1052,194 @@ def weekend_backtest(ws_config, tickers, months):
 
 
 # ─────────────────────────────────────────────────────────────
+# MARKET REGIME (fear/greed + buying/selling pressure)
+# ─────────────────────────────────────────────────────────────
+
+def _cached_universe(ws_cfg: dict) -> list:
+    """Core tickers + every ticker with cached daily AND 15-min bars (no API calls needed to use them)."""
+    from pathlib import Path
+
+    store = Path("data/weekend_swing_bars")
+    cached = {p.name.split("_")[0] for p in store.glob("*_15Min.parquet")} if store.exists() else set()
+    core = [t.upper() for t in ws_cfg.get("universe", {}).get("core_tickers", [])]
+    return list(dict.fromkeys(core + sorted(cached)))
+
+
+@main.command()
+@click.option("--config", "rg_config", default="market_regime.yaml", help="Regime config file")
+@click.option("--weekend-config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config (breadth universe)")
+@click.option("--no-save", is_flag=True, help="Don't write the snapshot to data/market_regime.db")
+def regime(rg_config, ws_config, no_save):
+    """Fear/Greed index + which way buying/selling pressure is coming from."""
+    import pandas as pd
+
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.market_regime.provider import RegimeProvider
+    from signal_engine.market_regime.store import RegimeStore
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+
+    rg_cfg, ws_cfg = _load_config(rg_config), _load_config(ws_config)
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    provider = RegimeProvider(rg_cfg, IntradayBarStore(alpaca), _cached_universe(ws_cfg))
+    with console.status("[bold green]Computing market regime..."):
+        r = provider.as_of(pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1))  # include today's bar
+    if r is None:
+        console.print("[red]No SPY data available — cannot compute regime.[/red]")
+        sys.exit(1)
+
+    console.print()
+    console.rule(f"[bold cyan]Market regime as of {r.as_of}[/bold cyan]")
+    fg = f"{r.fear_greed:.0f}" if r.fear_greed is not None else "n/a"
+    color = "green" if r.pressure_label == "BULLISH" else "red" if r.pressure_label == "BEARISH" else "yellow"
+    console.print(f"Fear/Greed: [bold]{fg}[/bold] ({r.fear_greed_label})   "
+                  f"Pressure: [{color}]{r.pressure:+.2f} {r.pressure_label}[/{color}]\n")
+
+    t = Table(box=box.SIMPLE, title="Components")
+    t.add_column("Fear/Greed input"); t.add_column("Score", justify="right"); t.add_column("Raw", justify="right")
+    for k, v in r.components.items():
+        t.add_row(k, f"{v['score']:.0f}", str(v["raw"]))
+    console.print(t)
+    t = Table(box=box.SIMPLE)
+    t.add_column("Pressure input"); t.add_column("Value", justify="right")
+    for k, v in r.pressure_components.items():
+        t.add_row(k, f"{v:+.2f}")
+    console.print(t)
+    for line in r.summary:
+        console.print(f"  - {line}")
+    console.print()
+
+    if not no_save:
+        RegimeStore().save(r)
+
+
+@main.command(name="weekend-regime-study")
+@click.option("--config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config")
+@click.option("--regime-config", "rg_config", default="market_regime.yaml", help="Regime config file")
+@click.option("--tickers", default=None, help="Comma-separated override (default: core + all tickers with cached 15-min bars)")
+@click.option("--months", default=None, type=int, help="Lookback months override")
+def weekend_regime_study(ws_config, rg_config, tickers, months):
+    """
+    Backtest the weekend strategies with every trade tagged by its Monday's
+    regime, then report results by pressure/fear-greed bucket and what the
+    configured regime policy would have changed (full range and each half).
+    """
+    import pandas as pd
+
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.data.news_client import FinnhubNewsClient
+    from signal_engine.market_regime.policy import RegimePolicy
+    from signal_engine.market_regime.provider import RegimeProvider
+    from signal_engine.weekend_swing.backtest import WeekendSwingBacktester
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+    from signal_engine.weekend_swing.regime_study import run_study, trades_to_dicts
+
+    ws_cfg, rg_cfg = _load_config(ws_config), _load_config(rg_config)
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    finnhub = None
+    try:
+        finnhub = FinnhubNewsClient()
+    except EnvironmentError:
+        pass
+
+    ticker_list = [t.strip().upper() for t in tickers.split(",")] if tickers else _cached_universe(ws_cfg)
+    lookback = months or ws_cfg.get("backtest", {}).get("lookback_months", 12)
+    end = pd.Timestamp.now(tz="UTC").normalize()
+    start = end - pd.DateOffset(months=lookback)
+    console.print(f"[dim]{len(ticker_list)} tickers, {start.date()} -> {end.date()}[/dim]")
+
+    bar_store = IntradayBarStore(alpaca)
+    provider = RegimeProvider(rg_cfg, bar_store, ticker_list)
+    provider.for_range(start, end)
+    bt = WeekendSwingBacktester(ws_cfg, bar_store, finnhub, regime_provider=provider)
+
+    with console.status("[bold green]Replaying strategies with regime tags..."):
+        trades = bt.collect_strategy_1_trades(ticker_list, start, end)
+        trades += bt.collect_strategy_2_trades(ticker_list, start, end)
+        go, fail = bt.collect_strategy_3_trades(ticker_list, start, end)
+        trades += go + fail
+
+    # Study uses an always-on policy built from the config's thresholds so it can be
+    # evaluated before the live switch is flipped.
+    pol_cfg = dict(rg_cfg)
+    pol_cfg["policy"] = {**rg_cfg.get("policy", {}), "enabled": True}
+    study = run_study(trades_to_dicts(trades), RegimePolicy(pol_cfg))
+
+    console.print(f"\n[bold]{study['n_trades']} trades ({study['n_tagged']} regime-tagged)[/bold]")
+    for title, key in [("By pressure label / direction", "by_pressure_label"),
+                       ("With vs against pressure", "by_alignment"),
+                       ("By fear/greed / direction", "by_fear_greed")]:
+        t = Table(title=title, box=box.SIMPLE)
+        t.add_column("Bucket"); t.add_column("N", justify="right")
+        t.add_column("Win%", justify="right"); t.add_column("EV/trade %", justify="right")
+        for k, v in study[key].items():
+            t.add_row(k, str(v["n"]), f"{v['win_rate_pct']}", f"{v['ev_pct']:+.3f}")
+        console.print(t)
+
+    t = Table(title="Regime policy effect (EV per $ deployed)", box=box.SIMPLE)
+    t.add_column("Window"); t.add_column("Baseline N", justify="right"); t.add_column("Baseline EV %", justify="right")
+    t.add_column("Policy N", justify="right"); t.add_column("Policy EV %", justify="right"); t.add_column("Skipped EV %", justify="right")
+    for label, k in [("All", "policy"), ("First half", "policy_first_half"), ("Second half", "policy_second_half")]:
+        p = study[k]
+        fmt = lambda x: "n/a" if x["ev_pct"] is None else f"{x['ev_pct']:+.3f}"
+        t.add_row(label, str(p["baseline"]["n"]), fmt(p["baseline"]), str(p["with_policy"]["n"]),
+                  fmt(p["with_policy"]), fmt(p["skipped"]))
+    console.print(t)
+    console.print("[dim]Enable the policy (config/market_regime.yaml -> policy.enabled) only if it helps in BOTH halves.[/dim]\n")
+
+
+@main.command(name="weekly-cycle")
+@click.option("--phase", type=click.Choice(["auto", "scan", "trigger", "manage", "review"]), default="auto",
+              help="auto picks the phases that apply right now (US Eastern time)")
+@click.option("--config", "ws_config", default="weekend_swing.yaml", help="Weekend swing config")
+@click.option("--regime-config", "rg_config", default="market_regime.yaml", help="Regime config file")
+@click.option("--dry-run", is_flag=True, help="Log what would be submitted/closed; send no orders")
+@click.option("--print-cron", is_flag=True, help="Print the crontab lines that run the weekly cycle, then exit")
+def weekly_cycle(phase, ws_config, rg_config, dry_run, print_cron):
+    """
+    Weekly paper-trading cycle (Alpaca PAPER account only): scan -> Monday
+    triggers + auto-submit -> stop enforcement / Friday close -> weekly review.
+    Safe to run repeatedly (every phase is idempotent); schedule it with cron.
+    """
+    import pandas as pd
+
+    from signal_engine.data.alpaca_client import AlpacaDataClient
+    from signal_engine.data.news_client import FinnhubNewsClient
+    from signal_engine.weekend_swing.data_store import IntradayBarStore
+    from signal_engine.weekend_swing.tracker import WeekendSwingTracker
+    from signal_engine.weekend_swing.weekly_cycle import CRON_LINES, WeeklyCycle
+
+    if print_cron:
+        click.echo(CRON_LINES)
+        return
+
+    ws_cfg, rg_cfg = _load_config(ws_config), _load_config(rg_config)
+    try:
+        alpaca = AlpacaDataClient()
+    except EnvironmentError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    finnhub = None
+    try:
+        finnhub = FinnhubNewsClient()
+    except EnvironmentError:
+        pass
+
+    stamp = lambda msg: console.print(f"[dim]{datetime.now().isoformat(timespec='seconds')}[/dim] {msg}", highlight=False)
+    cycle = WeeklyCycle(ws_cfg, rg_cfg, alpaca, finnhub, IntradayBarStore(alpaca), WeekendSwingTracker(),
+                        dry_run=dry_run, log=stamp)
+    cycle.run(phase, pd.Timestamp.now(tz="UTC"))
+
+
+# ─────────────────────────────────────────────────────────────
 # DASHBOARD
 # ─────────────────────────────────────────────────────────────
 
