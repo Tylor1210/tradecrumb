@@ -368,3 +368,133 @@ def test_cli_runs_on_fake_data(monkeypatch, tmp_path):
     trades = pd.read_csv(out_csv)
     assert set(trades["instrument"]) == {"stock", "call"}
     assert trades["ticker"].eq("XYZ").all()
+
+
+# ─────────────────────────────────────────────────────────────
+# VARIANTS
+# ─────────────────────────────────────────────────────────────
+
+class TestVariants:
+    def test_reclaim_waits_for_close_above_50_day(self):
+        from signal_engine.leaps_dip.rules import DipRules as R
+        rules = R(min_history_bars=50, reclaim_sma_bars=20)
+        df, pin_i = _crash_then_pin(rebound_to=150)
+        ind = prepare_ticker(df, rules)
+        t = build_trade("XYZ", ind, pin_i, rules, TradeRules(reclaim_sma=True, profit_take=None), ind.index[-1])
+        decide = ind.index.get_loc(t.entry_date) - 1
+        assert decide > pin_i
+        assert ind["close"].iloc[decide] > ind["sma_reclaim"].iloc[decide]
+        assert (ind["close"].iloc[pin_i:decide] <= ind["sma_reclaim"].iloc[pin_i:decide]).all()
+
+    def test_reclaim_gives_up_if_price_never_recovers(self):
+        df, pin_i = _crash_then_pin(rebound_to=60, rebound_bars=150)
+        ind = prepare_ticker(df, RULES)
+        assert build_trade("XYZ", ind, pin_i, RULES, TradeRules(reclaim_sma=True), ind.index[-1]) is None
+
+    def test_market_filter_blocks_entries(self):
+        from signal_engine.leaps_dip.simulate import market_filter
+        df, pin_i = _crash_then_pin(rebound_to=150)
+        ind = prepare_ticker(df, RULES)
+        off = pd.Series(False, index=ind.index)
+        on = pd.Series(True, index=ind.index)
+        assert build_trade("XYZ", ind, pin_i, RULES, TradeRules(), ind.index[-1], market_ok=off) is None
+        assert build_trade("XYZ", ind, pin_i, RULES, TradeRules(), ind.index[-1], market_ok=on) is not None
+        spy = _bars(list(np.linspace(100, 200, 250)) + list(np.linspace(200, 100, 50)))
+        ok = market_filter(spy["close"], 200)
+        assert not ok.iloc[:199].any()
+        assert ok.iloc[240] and not ok.iloc[-1]
+
+    def test_time_stop_sells_losers_at_checkpoint(self):
+        df, pin_i = _crash_then_pin(rebound_to=70, rebound_bars=200)
+        ind = prepare_ticker(df, RULES)
+        tr = TradeRules(hold_months=12, profit_take=None, time_stop_months=3)
+        t = build_trade("XYZ", ind, pin_i, RULES, tr, ind.index[-1])
+        assert t.exit_reason == "time_stop"
+        assert t.bars_held == tr.time_stop_bars
+
+    def test_time_stop_keeps_winners(self):
+        df, pin_i = _crash_then_pin(rebound_to=110, rebound_bars=300)
+        ind = prepare_ticker(df, RULES)
+        tr = TradeRules(hold_months=12, profit_take=None, time_stop_months=3)
+        assert build_trade("XYZ", ind, pin_i, RULES, tr, ind.index[-1]).exit_reason == "time"
+
+    def test_stop_loss_on_shares(self):
+        df, pin_i = _crash_then_pin(rebound_to=40, rebound_bars=100)
+        ind = prepare_ticker(df, RULES)
+        t = build_trade("XYZ", ind, pin_i, RULES, TradeRules(profit_take=None, stop_loss=0.25), ind.index[-1])
+        assert t.exit_reason == "stop"
+        assert -30 < t.return_pct <= -25
+
+    def test_slot_pct_sizes_trades(self):
+        t = _fake_trade("A", "2021-02-01", "2021-03-01", 1.5)
+        res = replay_account([t], TestAccount.CAL, max_positions=10, initial_capital=10_000, slot_pct=0.08)
+        assert res.equity.iloc[-1] == pytest.approx(10_400)
+
+    def test_periods_replay_fresh(self):
+        df, pin_i = _crash_then_pin(rebound_to=150)
+        prepared = {"XYZ": prepare_ticker(df, RULES)}
+        cal = prepared["XYZ"].index
+        split = str(cal[100].date())
+        res = run_backtest(prepared, cal, RULES, TradeRules(profit_take=0.3), split_dates=[split])
+        assert len(res.periods) == 2
+        early, late = res.periods[0][1], res.periods[1][1]
+        assert early.total_return_pct == pytest.approx(0.0)   # signal comes after the split
+        assert late.total_return_pct > 0
+
+    def test_default_variants_are_few_and_distinct(self):
+        from signal_engine.leaps_dip.variants import default_variants
+        vs = default_variants()
+        assert [v.key for v in vs] == ["base", "stop", "reclaim", "trend", "time", "all", "all_small"]
+        small = vs[-1]
+        assert small.slot_pct == pytest.approx(0.08) and small.max_positions == 10
+        tr = small.trade_rules(TradeRules())
+        assert tr.stop_loss == 0.25 and tr.reclaim_sma and tr.time_stop_months == 3
+
+
+def _fake_cli_setup(monkeypatch, tmp_path, extra_yaml=""):
+    import signal_engine.cli as cli
+    import signal_engine.data.alpaca_client as ac
+    import signal_engine.data.cache as cache_mod
+
+    df, _ = _crash_then_pin(rebound_to=150)
+    spy = _bars(np.linspace(300, 330, len(df)))
+    fake = _FakeAlpaca({"XYZ": df, "SPY": spy})
+    monkeypatch.setattr(ac, "AlpacaDataClient", lambda: fake)
+    monkeypatch.setattr(cache_mod.ParquetCache.__init__, "__defaults__", (tmp_path / "cache", 24))
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "leaps_dip.yaml").write_text(
+        "backtest: {start: '2020-01-01', holds_months: [6], max_positions: 3, revenue_filter: false}\n"
+        "rules: {min_history_bars: 50}\n"
+        "trade: {stock_profit_take: 0.3, call_profit_take: 1.0}\n"
+        "universe: {tickers: [XYZ]}\n" + extra_yaml
+    )
+    monkeypatch.setattr(cli, "CONFIG_DIR", cfg_dir)
+    return cli
+
+
+def test_cli_compare_variants_fits_80_columns(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+    from rich.console import Console
+
+    cli = _fake_cli_setup(monkeypatch, tmp_path, "variants: {split_date: '2020-06-01'}\n")
+    monkeypatch.setattr(cli, "console", Console(width=80, force_terminal=False, color_system=None))
+    result = CliRunner().invoke(cli.main, ["leaps-dip-backtest", "--compare-variants"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Best is" in out and "All four" in out and "SPY buy and hold" in out
+    assert "2020-20" in out or "2020-" in out
+    assert max(len(line) for line in out.splitlines()) <= 80
+    assert "…" not in out
+
+
+def test_cli_default_fits_80_columns(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+    from rich.console import Console
+
+    cli = _fake_cli_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "console", Console(width=80, force_terminal=False, color_system=None))
+    result = CliRunner().invoke(cli.main, ["leaps-dip-backtest", "--holds", "6,12,24"])
+    assert result.exit_code == 0, result.output
+    assert "Shares 24mo" in result.output and "Calls~ 6mo" in result.output
+    assert "…" not in result.output

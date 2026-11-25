@@ -1150,6 +1150,10 @@ def weekend_backtest(ws_config, tickers, months, compare_exits):
 # LEAPS DIP BACKTEST (beaten-down quality stocks, from a trading video)
 # ─────────────────────────────────────────────────────────────
 
+def _pct(v: float, signed: bool = True) -> str:
+    return f"{v:+.1f}%" if signed else f"{v:.0f}%"
+
+
 @main.command(name="leaps-dip-backtest")
 @click.option("--config", "ld_config", default="leaps_dip.yaml", help="Dip strategy config")
 @click.option("--holds", default=None, help="Comma-separated hold periods in months (default 6,12,24)")
@@ -1160,9 +1164,14 @@ def weekend_backtest(ws_config, tickers, months, compare_exits):
 @click.option("--no-revenue-filter", is_flag=True, help="Skip the revenue growth check")
 @click.option("--compare-revenue-filter", is_flag=True, help="Also show results without the revenue check")
 @click.option("--no-options", is_flag=True, help="Skip the rough call option estimate")
+@click.option("--compare-variants", is_flag=True,
+              help="Shares only: the video rules vs a stop, a 50-day reclaim, a SPY trend filter, "
+                   "a time stop and smaller sizing, each on an early and a late period")
+@click.option("--split", default=None, help="Date that splits the early and late periods (default from config)")
+@click.option("--wide", is_flag=True, help="Every column (needs a wide terminal)")
 @click.option("--trades-csv", default=None, help="Write every trade the account took to this CSV")
-def leaps_dip_backtest(ld_config, holds, tickers, start, max_positions, profit_take,
-                       no_revenue_filter, compare_revenue_filter, no_options, trades_csv):
+def leaps_dip_backtest(ld_config, holds, tickers, start, max_positions, profit_take, no_revenue_filter,
+                       compare_revenue_filter, no_options, compare_variants, split, wide, trades_csv):
     """
     Backtest the beaten-down stock LEAPS rules on the stocks themselves.
 
@@ -1171,6 +1180,9 @@ def leaps_dip_backtest(ld_config, holds, tickers, start, max_positions, profit_t
     year, daily RSI is under 30 and a bullish pin bar prints. Add once on
     bullish RSI divergence. Hold 6/12/24 months or until the profit take.
     Compared with buying and holding SPY and with the 25%-a-year target.
+
+    \b
+    --compare-variants tests fixes for the big losers side by side.
     """
     import time
 
@@ -1182,23 +1194,39 @@ def leaps_dip_backtest(ld_config, holds, tickers, start, max_positions, profit_t
     from signal_engine.leaps_dip.fundamentals import fetch_revenue_history
     from signal_engine.leaps_dip.rules import DipRules
     from signal_engine.leaps_dip.simulate import (
-        OptionAssumptions, TradeRules, buy_and_hold, prepare_ticker, run_backtest,
+        OptionAssumptions, TradeRules, buy_and_hold, calendar_pieces, market_filter,
+        prepare_ticker, run_backtest,
     )
+    from signal_engine.leaps_dip.variants import default_variants
 
     cfg = _load_config(ld_config)
     bt = cfg.get("backtest", {}) or {}
     tcfg = cfg.get("trade", {}) or {}
+    vcfg = cfg.get("variants", {}) or {}
     rules = DipRules.from_config(cfg.get("rules", {}))
     opt = OptionAssumptions.from_config(cfg.get("option", {}))
-    hold_list = [int(h) for h in holds.split(",")] if holds else list(bt.get("holds_months", [6, 12, 24]))
+    if holds:
+        hold_list = [int(h) for h in holds.split(",")]
+    elif compare_variants:
+        hold_list = [int(vcfg.get("hold_months", 12))]
+    else:
+        hold_list = list(bt.get("holds_months", [6, 12, 24]))
     max_pos = max_positions or int(bt.get("max_positions", 5))
     capital = float(bt.get("initial_capital", 10_000))
     target = float(bt.get("target_cagr_pct", 25))
     stock_pt = profit_take if profit_take is not None else tcfg.get("stock_profit_take", 0.5)
     call_pt = tcfg.get("call_profit_take", 1.0)
+    split_date = split or str(vcfg.get("split_date", "2022-01-01"))
+
+    def base_rules(hold, instrument, pt):
+        return TradeRules(
+            hold_months=hold, profit_take=pt, stop_loss=tcfg.get("stop_loss"),
+            entry_fraction=float(tcfg.get("entry_fraction", 2 / 3)),
+            fees_pct=float(tcfg.get("fees_pct", 0.1)), instrument=instrument, option=opt,
+        )
 
     console.print()
-    console.rule("[bold cyan]signal-engine LEAPS dip backtest[/bold cyan]")
+    console.rule("[bold cyan]LEAPS dip backtest[/bold cyan]")
 
     try:
         alpaca = AlpacaDataClient()
@@ -1232,101 +1260,171 @@ def leaps_dip_backtest(ld_config, holds, tickers, start, max_positions, profit_t
             from signal_engine.data.news_client import FinnhubNewsClient
             fh = FinnhubNewsClient()
             revenue = {}
-            # Only tickers that ever had a raw signal need fundamentals
             need = [t for t, ind in prepared.items() if ind["signal"].any()]
             with console.status(f"[bold green]Fetching annual revenue filings for {len(need)} tickers (Finnhub)..."):
                 for t in need:
-                    key = f"leaps_dip:revenue:{t}"
-                    cached = cache.get(key, ttl_hours=24 * 30) is not None
+                    cached = cache.get(f"leaps_dip:revenue:{t}", ttl_hours=24 * 30) is not None
                     revenue[t] = fetch_revenue_history(fh._client, t, cache)
                     if not cached:
                         time.sleep(1.1)  # free tier is 60 calls a minute
         except EnvironmentError:
-            console.print("[yellow]FINNHUB_API_KEY not set, so the revenue growth check is off for this run.[/yellow]")
+            console.print("[yellow]FINNHUB_API_KEY not set, so the revenue check is off.[/yellow]")
             use_revenue = False
             compare_revenue_filter = False
 
     console.print(
-        f"[dim]{len(prepared)} symbols with data, {calendar[0].date()} to {calendar[-1].date()}. "
-        f"Max {max_pos} positions, ${capital:,.0f} start.[/dim]"
+        f"[dim]{len(prepared)} stocks, {calendar[0].date()} to {calendar[-1].date()}, "
+        f"${capital:,.0f} start, revenue check {'on' if use_revenue else 'off'}.[/dim]"
     )
     if missing:
         console.print(f"[dim]No data for {len(missing)}: {', '.join(missing)}[/dim]")
 
     spy_bh = buy_and_hold(spy["close"], calendar)
-
-    variants = [("stock", stock_pt)] + ([] if no_options else [("call", call_pt)])
-    filters = [use_revenue] + ([False] if compare_revenue_filter and use_revenue else [])
     all_taken = []
-    counts = None
-    for instrument, pt in variants:
-        label = "Shares" if instrument == "stock" else "Calls (rough estimate)"
-        table = Table(title=f"{label}, profit take +{pt * 100:.0f}%", box=box.ROUNDED)
-        for col in ["Hold", "Revenue check", "Trades", "Win rate", "Bar", "Avg trade", "Worst trade",
-                    "Acct CAGR", "Acct max DD", "vs 25%", "Skipped"]:
-            table.add_column(col, justify="left" if col in ("Hold", "Revenue check") else "right")
-        for hold in hold_list:
-            for rev_on in filters:
-                tr = TradeRules(
-                    hold_months=hold, profit_take=pt, stop_loss=tcfg.get("stop_loss"),
-                    entry_fraction=float(tcfg.get("entry_fraction", 2 / 3)),
-                    fees_pct=float(tcfg.get("fees_pct", 0.1)), instrument=instrument, option=opt,
-                )
-                with console.status(f"[bold green]{label}, {hold} month hold..."):
-                    res = run_backtest(prepared, calendar, rules, tr, max_pos, capital,
-                                       revenue_histories=revenue, revenue_filter=rev_on)
-                counts = res.counts
-                s, a = res.signal_stats, res.account.summary
-                has = s.trades > 0
-                table.add_row(
-                    f"{hold} mo", "on" if rev_on else "off", str(s.trades),
-                    f"{s.win_rate_pct:.1f}%" if has else "n/a", _bar_check(s.win_rate_pct, s.trades),
-                    f"{s.avg_pct:+.1f}%" if has else "n/a", f"{s.worst_pct:+.1f}%" if has else "n/a",
-                    f"{a.cagr_pct:+.1f}%", f"{a.max_drawdown_pct:.1f}%",
-                    "✅" if a.cagr_pct >= target else "❌", str(res.account.skipped),
-                )
-                for t in res.account.taken:
-                    all_taken.append({
-                        "instrument": instrument, "hold_months": hold, "revenue_check": rev_on,
-                        "ticker": t.ticker, "signal_date": t.signal_date.date(), "entry_date": t.entry_date.date(),
-                        "add_date": t.add_date.date() if t.add_date is not None else None,
-                        "exit_date": t.exit_date.date(), "exit_reason": t.exit_reason,
-                        "drawdown_at_signal_pct": round(t.drawdown_at_signal * 100, 1),
-                        "rsi_at_signal": round(t.rsi_at_signal, 1),
-                        "stock_return_pct": round(t.stock_return_pct, 2), "return_pct": round(t.return_pct, 2),
-                        "revenue_growing": t.revenue_growing,
-                    })
-        console.print(table)
+    last_counts = None
 
-    console.print(
-        f"SPY buy and hold over the same days: CAGR {spy_bh.cagr_pct:+.1f}%, "
-        f"max drawdown {spy_bh.max_drawdown_pct:.1f}%. Target: {target:.0f}% a year."
-    )
+    def collect(res, setup):
+        for t in res.account.taken:
+            all_taken.append({
+                "setup": setup, "instrument": res.tr.instrument, "hold_months": res.tr.hold_months,
+                "ticker": t.ticker, "signal_date": t.signal_date.date(), "entry_date": t.entry_date.date(),
+                "add_date": t.add_date.date() if t.add_date is not None else None,
+                "exit_date": t.exit_date.date(), "exit_reason": t.exit_reason,
+                "drawdown_at_signal_pct": round(t.drawdown_at_signal * 100, 1),
+                "rsi_at_signal": round(t.rsi_at_signal, 1),
+                "stock_return_pct": round(t.stock_return_pct, 2), "return_pct": round(t.return_pct, 2),
+                "revenue_growing": t.revenue_growing,
+            })
+
+    def verdict(label, cagr):
+        beats = cagr > spy_bh.cagr_pct
+        hit = cagr >= target
+        mark = "✅" if hit else ("🟡" if beats else "❌")
+        tail = "Hits the target." if hit else ("Beats SPY, short of target." if beats else "Doesn't beat SPY.")
+        console.print(
+            f"\n{mark} [bold]Best is {label}[/bold], {cagr:+.1f}% a year vs SPY "
+            f"{spy_bh.cagr_pct:+.1f}% and target {target:.0f}%. {tail}"
+        )
+
+    if compare_variants:
+        hold = hold_list[0]
+        market_ok = market_filter(spy["close"], int(vcfg.get("trend_sma_bars", 200)))
+        pieces = calendar_pieces(calendar, [split_date])
+        spy_pieces = [buy_and_hold(spy["close"], cal) for _, cal in pieces]
+        rows = []
+        for v in default_variants(vcfg):
+            tr = v.trade_rules(base_rules(hold, "stock", stock_pt))
+            with console.status(f"[bold green]{v.label}..."):
+                res = run_backtest(
+                    prepared, calendar, rules, tr, v.max_positions or max_pos, capital,
+                    revenue_histories=revenue, revenue_filter=use_revenue,
+                    market_ok=market_ok if v.market_filter else None,
+                    slot_pct=v.slot_pct, split_dates=[split_date],
+                )
+            rows.append((v, res))
+            collect(res, v.key)
+            last_counts = res.counts
+
+        best_v, best = max(rows, key=lambda r: r[1].account.summary.cagr_pct)
+        verdict(best_v.label, best.account.summary.cagr_pct)
+        steady = [
+            v.label for v, res in rows
+            if res.periods and all(p.cagr_pct > sp.cagr_pct for (_, p), sp in zip(res.periods, spy_pieces))
+        ]
+        console.print(
+            f"Beat SPY in both periods, {', '.join(steady)}." if steady
+            else "None beat SPY in both periods."
+        )
+        table = Table(title=f"Shares, {hold} mo hold, +{stock_pt * 100:.0f}% profit take", box=box.SIMPLE_HEAD)
+        labels = [lbl for lbl, _ in pieces]
+        cols = ["Setup", "Win", "Worst", "CAGR"] + labels + ["MaxDD"]
+        if wide:
+            cols += ["Trades", "Avg", "Skip"]
+        for c in cols:
+            table.add_column(c, justify="left" if c == "Setup" else "right")
+        for v, res in rows:
+            s, a = res.signal_stats, res.account.summary
+            row = [v.label, _pct(s.win_rate_pct, False), _pct(s.worst_pct, True), _pct(a.cagr_pct)]
+            row += [_pct(p.cagr_pct) for _, p in res.periods]
+            row += [_pct(a.max_drawdown_pct, False)]
+            if wide:
+                row += [str(s.trades), _pct(s.avg_pct), str(res.account.skipped)]
+            table.add_row(*row)
+        spy_row = ["SPY buy and hold", "", "", _pct(spy_bh.cagr_pct)] + [_pct(p.cagr_pct) for p in spy_pieces]
+        spy_row += [_pct(spy_bh.max_drawdown_pct, False)] + (["", "", ""] if wide else [])
+        table.add_row(*spy_row, style="dim")
+        console.print(table)
+        late = labels[-1] if labels else "late"
+        console.print(
+            f"[dim]CAGR is one account, {labels[0] if labels else 'early'} and {late} each start fresh. "
+            "A fix worth keeping should beat SPY in both periods, not just overall.\n"
+            "Win, Worst use every signal. Settings were picked up front, not tuned.[/dim]"
+        )
+    else:
+        variants = [("stock", stock_pt)] + ([] if no_options else [("call", call_pt)])
+        filters = [use_revenue] + ([False] if compare_revenue_filter and use_revenue else [])
+        rows = []
+        for instrument, pt in variants:
+            for hold in hold_list:
+                for rev_on in filters:
+                    tr = base_rules(hold, instrument, pt)
+                    name = ("Shares" if instrument == "stock" else "Calls~") + f" {hold}mo"
+                    if len(filters) > 1:
+                        name += "" if rev_on else ", no rev"
+                    with console.status(f"[bold green]{name}..."):
+                        res = run_backtest(prepared, calendar, rules, tr, max_pos, capital,
+                                           revenue_histories=revenue, revenue_filter=rev_on)
+                    rows.append((name, res, rev_on))
+                    collect(res, name)
+                    last_counts = res.counts
+
+        best_name, best, _ = max(rows, key=lambda r: r[1].account.summary.cagr_pct)
+        verdict(best_name, best.account.summary.cagr_pct)
+        table = Table(
+            title=f"Profit take shares +{stock_pt * 100:.0f}%, calls +{call_pt * 100:.0f}%, max {max_pos} open",
+            box=box.SIMPLE_HEAD,
+        )
+        cols = ["Setup", "Trades", "Win", "Avg", "Worst", "CAGR", "MaxDD"]
+        if wide:
+            cols += ["Bar", "Skip"]
+        for c in cols:
+            table.add_column(c, justify="left" if c == "Setup" else "right")
+        for name, res, rev_on in rows:
+            s, a = res.signal_stats, res.account.summary
+            has = s.trades > 0
+            row = [
+                name, str(s.trades), _pct(s.win_rate_pct, False) if has else "n/a",
+                _pct(s.avg_pct) if has else "n/a", _pct(s.worst_pct) if has else "n/a",
+                _pct(a.cagr_pct), _pct(a.max_drawdown_pct, False),
+            ]
+            if wide:
+                row += [_bar_check(s.win_rate_pct, s.trades), str(res.account.skipped)]
+            table.add_row(*row)
+        table.add_row("SPY buy and hold", "", "", "", "", _pct(spy_bh.cagr_pct),
+                      _pct(spy_bh.max_drawdown_pct, False), *([""] * (2 if wide else 0)), style="dim")
+        console.print(table)
+        console.print(
+            "[dim]Win, Avg, Worst use every signal. CAGR, MaxDD replay one account. "
+            "Calls~ is a rough Black-Scholes guess, not real option prices.[/dim]"
+        )
+
     ended = sorted({r["ticker"] for r in all_taken if r["exit_reason"] == "data_ended"})
     if ended:
         console.print(
-            f"[yellow]Data stopped early while held (sold at the last price): {', '.join(ended)}. "
-            "For a buyout that is about right; for a failure like SVB the real outcome was near zero, "
-            "so these results look better than reality.[/yellow]"
+            f"[yellow]Data stopped while held, sold at last price: {', '.join(ended)}. "
+            "Failures were really near zero, so results here look a bit better than reality.[/yellow]"
         )
-    if counts is not None:
+    if wide and last_counts is not None:
         rev_note = (
-            f" Revenue check: {counts.revenue_pass} passed, {counts.revenue_fail} failed, "
-            f"{counts.revenue_unknown} unknown (unknown counts as a fail when the check is on)."
+            f" Revenue {last_counts.revenue_pass} passed, {last_counts.revenue_fail} failed, "
+            f"{last_counts.revenue_unknown} unknown (counts as failed)."
             if revenue is not None else ""
         )
-        console.print(f"[dim]Raw signals (drawdown + RSI + pin bar): {counts.raw_signals}.{rev_note}[/dim]")
-    console.print(
-        "[dim]Trades, win rate, avg and worst use every signal, one trade at a time per ticker. "
-        "Acct columns replay one account with the position cap; Skipped = signals with no free slot.\n"
-        "Calls are a Black-Scholes guess from realized volatility with a spread cost, not real option prices. "
-        "High is the highest price since the data starts, not a true all-time high.[/dim]"
-    )
+        console.print(f"[dim]Raw signals {last_counts.raw_signals}.{rev_note}[/dim]")
     if trades_csv:
         pd.DataFrame(all_taken).to_csv(trades_csv, index=False)
         console.print(f"[dim]Wrote {len(all_taken)} trades to {trades_csv}[/dim]")
     console.print("[dim]Paper research only. Nothing submitted.[/dim]\n")
-
 
 def prepared_start(prepared: dict, spy_ind) -> "object":
     """First day the account can trade: when any ticker first has a full year of history."""

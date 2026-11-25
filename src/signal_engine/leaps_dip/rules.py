@@ -42,6 +42,7 @@ class DipRules:
     divergence_rsi_max: float = 45.0
     divergence_min_bars: int = 5      # bars after the signal before an add can trigger
     max_adds: int = 1
+    reclaim_sma_bars: int = 50        # moving average a "reclaim" entry waits for
 
     @classmethod
     def from_config(cls, cfg: dict) -> "DipRules":
@@ -98,6 +99,7 @@ def add_indicators(df: pd.DataFrame, rules: DipRules) -> pd.DataFrame:
     recent_rsi_min = out["rsi"].rolling(rules.rsi_lookback, min_periods=1).min()
     out["ref_rsi"] = recent_rsi_min
     out["ref_low"] = out["low"].rolling(rules.rsi_lookback, min_periods=1).min()
+    out["sma_reclaim"] = out["close"].rolling(rules.reclaim_sma_bars, min_periods=rules.reclaim_sma_bars).mean()
     out["signal"] = (
         (out["drawdown"] <= -rules.drawdown_min)
         & (recent_rsi_min < rules.rsi_max)

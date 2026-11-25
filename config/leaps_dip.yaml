@@ -31,6 +31,17 @@ trade:
   stop_loss: null            # the video uses none (a LEAP's premium is the max loss)
   fees_pct: 0.1
 
+# Fixes tested side by side with --compare-variants (shares only).
+# Round numbers picked up front, not tuned on the results.
+variants:
+  hold_months: 12
+  split_date: "2022-01-01"   # early and late periods are each replayed fresh
+  stop_loss: 0.25            # sell a trade 25% below what was paid
+  time_stop_months: 3        # at 3 months, sell a trade still under water
+  trend_sma_bars: 200        # only start trades while SPY is above this average
+  risk_pct: 0.02             # "small" sizing, 2% of the account at risk at the stop
+  small_max_positions: 10
+
 # Rough Black-Scholes estimate for the call version. Not real option quotes.
 option:
   min_years: 1.0

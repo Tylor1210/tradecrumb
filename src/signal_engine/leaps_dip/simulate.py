@@ -3,6 +3,10 @@ Trade and account simulation for the dip strategy.
 
 How a trade works
   - Signal at the close of day t (see rules.py), entry at the open of t+1.
+    With reclaim_sma on, the trade instead waits (up to reclaim_within_bars)
+    for the first close back above the 50-day average and enters the next
+    open. With a market filter, no trade starts on a day the filter is off
+    (for example SPY under its 200-day average).
   - Each trade owns a "slot" of the account. entry_fraction of the slot is
     bought on entry; the rest is held back in cash for one add on bullish
     RSI divergence. If no add happens, that cash just sits in the slot.
@@ -16,8 +20,8 @@ How a trade works
     backtest; real option quotes would be needed for that.
 
 Account replay
-  One cash balance. A new trade gets equity / max_positions as its slot,
-  capped by free cash. When max_positions trades are open, or the ticker is
+  One cash balance. A new trade gets equity / max_positions as its slot
+  (or slot_pct of equity), capped by free cash. When max_positions trades are open, or the ticker is
   already held, the new signal is skipped. Same-day signals are taken
   deepest drawdown first.
 
@@ -66,10 +70,20 @@ class TradeRules:
     fees_pct: float = 0.1                # stock fee/slippage per side, %
     instrument: str = "stock"            # "stock" or "call"
     option: OptionAssumptions = field(default_factory=OptionAssumptions)
+    reclaim_sma: bool = False            # wait for a close back above the 50-day average
+    reclaim_within_bars: int = 63        # give up on the signal if that takes longer
+    time_stop_months: Optional[float] = None   # check once at this age...
+    time_stop_min_return: float = 0.0          # ...and sell if the trade is below this
 
     @property
     def hold_bars(self) -> int:
         return int(self.hold_months * TRADING_DAYS_PER_MONTH)
+
+    @property
+    def time_stop_bars(self) -> Optional[int]:
+        if self.time_stop_months is None:
+            return None
+        return int(self.time_stop_months * TRADING_DAYS_PER_MONTH)
 
 
 @dataclass
@@ -78,7 +92,7 @@ class Trade:
     signal_date: pd.Timestamp
     entry_date: pd.Timestamp
     exit_date: pd.Timestamp
-    exit_reason: str                 # time, profit, stop, expiry, data_ended, open_at_end
+    exit_reason: str                 # time, profit, stop, time_stop, expiry, data_ended, open_at_end
     entry_stock_price: float
     exit_stock_price: float
     drawdown_at_signal: float        # e.g. -0.62
@@ -164,9 +178,22 @@ def build_trade(
     tr: TradeRules,
     data_end: pd.Timestamp,
     revenue_growing: Optional[bool] = None,
+    market_ok: Optional[pd.Series] = None,
 ) -> Optional[Trade]:
     """Walk one signal forward to its exit. ind comes from prepare_ticker()."""
-    entry_i = signal_i + 1
+    decide_i = signal_i
+    if tr.reclaim_sma:
+        last = min(signal_i + tr.reclaim_within_bars, len(ind) - 2)
+        close, sma = ind["close"].to_numpy(), ind["sma_reclaim"].to_numpy()
+        hits = [j for j in range(signal_i, last + 1) if not np.isnan(sma[j]) and close[j] > sma[j]]
+        if not hits:
+            return None
+        decide_i = hits[0]
+    if market_ok is not None:
+        ok = market_ok.asof(ind.index[decide_i])
+        if not (isinstance(ok, (bool, np.bool_)) and ok):
+            return None
+    entry_i = decide_i + 1
     if entry_i >= len(ind):
         return None
     inst = _Instrument(ind, entry_i, signal_i, tr)
@@ -211,6 +238,8 @@ def build_trade(
             exit_reason = "profit"
         elif tr.stop_loss is not None and inst_return <= -tr.stop_loss:
             exit_reason = "stop"
+        elif tr.time_stop_bars and held == tr.time_stop_bars and inst_return < tr.time_stop_min_return:
+            exit_reason = "time_stop"
         elif inst.expired(i):
             exit_reason = "expiry"
         elif i == last_i:
@@ -270,6 +299,7 @@ def candidate_trades(
     revenue_history: Optional[pd.DataFrame] = None,
     revenue_filter: bool = False,
     counts: Optional[SignalCounts] = None,
+    market_ok: Optional[pd.Series] = None,
 ) -> list[Trade]:
     """One trade per signal (overlapping allowed; the account decides which run)."""
     trades = []
@@ -287,7 +317,7 @@ def candidate_trades(
                 counts.revenue_unknown += 1
         if revenue_filter and growing is not True:
             continue
-        t = build_trade(ticker, ind, int(signal_i), rules, tr, data_end, growing)
+        t = build_trade(ticker, ind, int(signal_i), rules, tr, data_end, growing, market_ok)
         if t is not None:
             trades.append(t)
     return trades
@@ -354,7 +384,10 @@ def replay_account(
     calendar: pd.DatetimeIndex,
     max_positions: int = 5,
     initial_capital: float = 10_000.0,
+    slot_pct: Optional[float] = None,
 ) -> AccountResult:
+    """slot_pct is the share of equity each new trade gets (default 1 / max_positions)."""
+    slot_share = slot_pct if slot_pct else 1.0 / max_positions
     pending = sorted(trades, key=lambda t: (t.entry_date, t.drawdown_at_signal, t.ticker))
     p = 0
     cash = initial_capital
@@ -372,7 +405,7 @@ def replay_account(
             if len(active) >= max_positions or t.ticker in held:
                 skipped += 1
                 continue
-            slot = min(equity_prev / max_positions, cash)
+            slot = min(equity_prev * slot_share, cash)
             if slot <= 0:
                 skipped += 1
                 continue
@@ -452,6 +485,7 @@ class RunResult:
     account: AccountResult
     account_stats: TradeStats        # trades the account actually took
     counts: SignalCounts
+    periods: list = field(default_factory=list)  # [(label, AccountSummary)] for split_dates
 
 
 def run_backtest(
@@ -463,8 +497,16 @@ def run_backtest(
     initial_capital: float = 10_000.0,
     revenue_histories: Optional[dict[str, pd.DataFrame]] = None,
     revenue_filter: bool = False,
+    market_ok: Optional[pd.Series] = None,
+    slot_pct: Optional[float] = None,
+    split_dates: Optional[list] = None,
 ) -> RunResult:
-    """prepared maps ticker -> prepare_ticker() output; calendar is the SPY trading days."""
+    """
+    prepared maps ticker -> prepare_ticker() output; calendar is the SPY trading days.
+    split_dates (e.g. ["2022-01-01"]) also replays the account fresh on each
+    piece of the calendar, so a rule can be checked on a later period it was
+    not chosen on.
+    """
     data_end = calendar[-1]
     counts = SignalCounts()
     candidates: list[Trade] = []
@@ -473,17 +515,41 @@ def run_backtest(
         candidates += candidate_trades(
             ticker, ind, rules, tr, data_end,
             revenue_history=hist if revenue_histories is not None else None,
-            revenue_filter=revenue_filter, counts=counts,
+            revenue_filter=revenue_filter, counts=counts, market_ok=market_ok,
         )
     sequential = non_overlapping(candidates)
-    account = replay_account(candidates, calendar, max_positions, initial_capital)
+    account = replay_account(candidates, calendar, max_positions, initial_capital, slot_pct)
+    periods = []
+    for label, cal in calendar_pieces(calendar, split_dates):
+        in_piece = [t for t in candidates if cal[0] <= t.entry_date <= cal[-1]]
+        periods.append((label, replay_account(in_piece, cal, max_positions, initial_capital, slot_pct).summary))
     return RunResult(
         tr=tr,
         signal_stats=trade_stats(sequential),
         account=account,
         account_stats=trade_stats(account.taken),
         counts=counts,
+        periods=periods,
     )
+
+
+def calendar_pieces(calendar: pd.DatetimeIndex, split_dates: Optional[list]) -> list:
+    """[(label like "2017-21", sub-calendar), ...]; empty when no split dates."""
+    if not split_dates:
+        return []
+    edges = [calendar[0]] + [pd.Timestamp(d) for d in split_dates] + [calendar[-1] + pd.Timedelta(days=1)]
+    out = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        cal = calendar[(calendar >= lo) & (calendar < hi)]
+        if len(cal) > 1:
+            out.append((f"{cal[0].year}-{str(cal[-1].year)[2:]}", cal))
+    return out
+
+
+def market_filter(spy_close: pd.Series, sma_bars: int = 200) -> pd.Series:
+    """True on days SPY closes above its sma_bars-day average (False before it exists)."""
+    s = _naive_index(spy_close.to_frame("close"))["close"]
+    return (s > s.rolling(sma_bars, min_periods=sma_bars).mean()).astype(bool)
 
 
 def buy_and_hold(close: pd.Series, calendar: pd.DatetimeIndex) -> AccountSummary:
