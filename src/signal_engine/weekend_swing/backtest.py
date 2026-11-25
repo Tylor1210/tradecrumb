@@ -26,6 +26,12 @@ import vectorbt as vbt  # noqa: F401 (registers the .vbt accessor)
 
 from signal_engine.risk.loss_cap import LossCapRule, loss_pct_from_entry
 from signal_engine.weekend_swing.earnings import get_earnings_exclusions
+from signal_engine.weekend_swing.levels import (
+    bar_dates,
+    calendar_day,
+    monday_session_bars,
+    session_open_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +144,10 @@ def _simulate_exit(
         if direction == "short" and float(row["high"]) >= stop_price:
             return stop_price, "stopped_out", idx
 
-    rest_of_week = daily_df.loc[(daily_df.index > week_start) & (daily_df.index <= week_end)]
+    # Monday after entry is covered by the intraday walk above. Monday's daily bar is
+    # skipped: its low/high includes prices from before the entry.
+    dates = bar_dates(daily_df)
+    rest_of_week = daily_df.loc[(dates > calendar_day(week_start)) & (dates <= calendar_day(week_end))]
     exit_price, exit_time = entry_price, entry_time
     cap_state = loss_cap.new_trade() if loss_cap is not None else None
     for idx, row in rest_of_week.iterrows():
@@ -222,9 +231,7 @@ class WeekendSwingBacktester:
                 if levels is None:
                     continue
 
-                monday_bars = intraday_15.loc[
-                    (intraday_15.index >= week_start) & (intraday_15.index < week_start + pd.Timedelta(days=1))
-                ]
+                monday_bars = monday_session_bars(intraday_15, week_start)
                 if monday_bars.empty:
                     continue
 
@@ -272,12 +279,10 @@ class WeekendSwingBacktester:
                 if levels is None:
                     continue
 
-                monday_bars = intraday_5.loc[
-                    (intraday_5.index >= week_start) & (intraday_5.index < week_start + pd.Timedelta(days=1))
-                ]
+                monday_bars = monday_session_bars(intraday_5, week_start)
                 if monday_bars.empty:
                     continue
-                session_open = monday_bars.index.min()
+                session_open = session_open_time(week_start, monday_bars.index)
 
                 signal = strategy.check_trigger(levels, monday_bars, session_open)
                 if signal is None:
@@ -333,12 +338,10 @@ class WeekendSwingBacktester:
                 if levels is None:
                     continue
 
-                monday_bars = intraday_5.loc[
-                    (intraday_5.index >= week_start) & (intraday_5.index < week_start + pd.Timedelta(days=1))
-                ]
+                monday_bars = monday_session_bars(intraday_5, week_start)
                 if monday_bars.empty:
                     continue
-                monday_daily_row = daily_df.loc[daily_df.index >= week_start]
+                monday_daily_row = daily_df.loc[bar_dates(daily_df) >= calendar_day(week_start)]
                 if monday_daily_row.empty:
                     continue
                 monday_open = float(monday_daily_row.iloc[0]["open"])

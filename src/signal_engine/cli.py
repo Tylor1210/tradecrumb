@@ -885,6 +885,7 @@ def weekend_monitor(ws_config, once, poll_minutes):
     from signal_engine.data.alpaca_client import AlpacaDataClient
     from signal_engine.data.news_client import FinnhubNewsClient
     from signal_engine.weekend_swing.data_store import IntradayBarStore
+    from signal_engine.weekend_swing.levels import monday_session_bars, session_open_time
     from signal_engine.weekend_swing.scan import build_weekend_watchlist, next_or_current_monday
     from signal_engine.weekend_swing.tracker import WeekendSwingTracker
     from signal_engine.weekend_swing.weekend_swing_signals import (
@@ -952,7 +953,7 @@ def weekend_monitor(ws_config, once, poll_minutes):
                     if levels is None:
                         continue
                     monday_bars = bar_store.get_bars(ticker, "15Min", week_start, pd.Timestamp.now(tz="UTC"))
-                    monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                    monday_bars = monday_session_bars(monday_bars, week_start)
                     signal = strategy.check_trigger(levels, monday_bars)
 
                 elif strategy_name == "overnight_range_breakout":
@@ -961,10 +962,10 @@ def weekend_monitor(ws_config, once, poll_minutes):
                     if levels is None:
                         continue
                     monday_bars = bar_store.get_bars(ticker, "5Min", week_start, pd.Timestamp.now(tz="UTC"))
-                    monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                    monday_bars = monday_session_bars(monday_bars, week_start)
                     if monday_bars.empty:
                         continue
-                    signal = strategy.check_trigger(levels, monday_bars, monday_bars.index.min())
+                    signal = strategy.check_trigger(levels, monday_bars, session_open_time(week_start, monday_bars.index))
 
                 else:  # gap_strength
                     daily_df = bar_store.get_bars(ticker, "1Day", week_start - pd.Timedelta(days=60), week_start)
@@ -976,7 +977,7 @@ def weekend_monitor(ws_config, once, poll_minutes):
                         continue
                     monday_open = float(monday_daily.iloc[0]["open"])
                     monday_bars = bar_store.get_bars(ticker, "5Min", week_start, pd.Timestamp.now(tz="UTC"))
-                    monday_bars = monday_bars.loc[monday_bars.index < week_start + pd.Timedelta(days=1)]
+                    monday_bars = monday_session_bars(monday_bars, week_start)
                     if monday_bars.empty:
                         continue
                     signal = strategy.check_trigger(levels, monday_open, monday_bars.iloc[0])

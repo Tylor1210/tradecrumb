@@ -25,7 +25,7 @@ import pandas as pd
 
 from signal_engine.market_regime.policy import RegimePolicy
 from signal_engine.weekend_swing.backtest import _return_pct, _simulate_exit
-from signal_engine.weekend_swing.levels import is_data_sane
+from signal_engine.weekend_swing.levels import is_data_sane, monday_session_bars
 from signal_engine.weekend_swing.regime_study import run_study
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,9 @@ def _whatif(row: dict, bar_store) -> Optional[float]:
     week_end = week_start + pd.Timedelta(days=4)
     trig = pd.Timestamp(row["triggered_at"])
     trig = trig.tz_convert("UTC") if trig.tzinfo else trig.tz_localize("UTC")
-    monday = bar_store.get_bars(row["ticker"], "5Min", week_start, week_start + pd.Timedelta(days=1))
+    monday = monday_session_bars(
+        bar_store.get_bars(row["ticker"], "5Min", week_start, week_start + pd.Timedelta(days=1)), week_start
+    )
     daily = bar_store.get_bars(row["ticker"], "1Day", week_start - pd.Timedelta(days=5), week_end + pd.Timedelta(days=1))
     if monday.empty or daily.empty:
         return None
